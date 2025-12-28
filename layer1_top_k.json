@@ -1,0 +1,282 @@
+[
+  {
+    "rank": 1,
+    "params": [
+      -0.6734767318106583,
+      0.5988850625881523,
+      -1.6936806706724101,
+      1.953072670847178,
+      0.0010000000474974513,
+      9.999999747378752e-06
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": -0.44483184814453125,
+    "metrics": {
+      "steps": 814,
+      "duration_s": 1.6280000000000012,
+      "distance_x_m": 1.3221496336820462,
+      "mean_speed_mps": 0.8121312246204209,
+      "min_height_m": 0.5123987351042296,
+      "max_tilt_deg": 45.44483025485002,
+      "fallen": true,
+      "fall_time_s": 1.6280000000000012,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.05723177269101143,
+      "stl_robustness": -0.44483184814453125,
+      "stl_height_robustness": 0.1158987283706665,
+      "stl_tilt_robustness": -0.44483184814453125
+    }
+  },
+  {
+    "rank": 2,
+    "params": [
+      -1.7683502340940325,
+      -0.3233694288761503,
+      -2.8924794674433345,
+      1.9490367822196746,
+      0.019999999552965164,
+      9.999999747378752e-06
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": -0.3848152160644531,
+    "metrics": {
+      "steps": 851,
+      "duration_s": 1.7020000000000013,
+      "distance_x_m": 1.4060597193051818,
+      "mean_speed_mps": 0.826122044245112,
+      "min_height_m": 0.46017363329700256,
+      "max_tilt_deg": 45.38481499879818,
+      "fallen": true,
+      "fall_time_s": 1.7020000000000013,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.04772808030247688,
+      "stl_robustness": -0.3848152160644531,
+      "stl_height_robustness": 0.06367364525794983,
+      "stl_tilt_robustness": -0.3848152160644531
+    }
+  },
+  {
+    "rank": 3,
+    "params": [
+      -2.125824399661568,
+      0.3710085469026968,
+      -3.709940608130987,
+      1.9676602442805438,
+      0.0010000000474974513,
+      0.009999999776482582
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": -0.3533058166503906,
+    "metrics": {
+      "steps": 864,
+      "duration_s": 1.7280000000000013,
+      "distance_x_m": 1.714429890126067,
+      "mean_speed_mps": 0.992146927156288,
+      "min_height_m": 0.46317468325095296,
+      "max_tilt_deg": 45.35330567148792,
+      "fallen": true,
+      "fall_time_s": 1.7280000000000013,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.06620977818965912,
+      "stl_robustness": -0.3533058166503906,
+      "stl_height_robustness": 0.06667467951774597,
+      "stl_tilt_robustness": -0.3533058166503906
+    }
+  },
+  {
+    "rank": 4,
+    "params": [
+      -0.7773818006719369,
+      -0.48908934535955334,
+      -0.6523673141965867,
+      1.9845628246022569,
+      0.019999999552965164,
+      0.009999999776482582
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": -0.33142852783203125,
+    "metrics": {
+      "steps": 846,
+      "duration_s": 1.6920000000000013,
+      "distance_x_m": 1.5098726917187195,
+      "mean_speed_mps": 0.8923597468786751,
+      "min_height_m": 0.4212276819457534,
+      "max_tilt_deg": 45.3314271928952,
+      "fallen": true,
+      "fall_time_s": 1.6920000000000013,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.03189690038561821,
+      "stl_robustness": -0.33142852783203125,
+      "stl_height_robustness": 0.024727702140808105,
+      "stl_tilt_robustness": -0.33142852783203125
+    }
+  },
+  {
+    "rank": 5,
+    "params": [
+      -1.5764407272017569,
+      0.5017882260283621,
+      -1.6030587107835332,
+      1.0630803700883993,
+      0.019999999552965164,
+      0.009999999776482582
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": 0.2174198031425476,
+    "metrics": {
+      "steps": 7500,
+      "duration_s": 15.000000000001679,
+      "distance_x_m": 13.062918559193788,
+      "mean_speed_mps": 0.8708612372794884,
+      "min_height_m": 0.6139197867878703,
+      "max_tilt_deg": 6.305370695980451,
+      "fallen": false,
+      "fall_time_s": null,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.018720382824540138,
+      "stl_robustness": 0.2174198031425476,
+      "stl_height_robustness": 0.2174198031425476,
+      "stl_tilt_robustness": 38.69462966918945
+    }
+  },
+  {
+    "rank": 6,
+    "params": [
+      -1.8965500322736548,
+      0.4057232345861179,
+      -1.0061440861777766,
+      1.0610237121582036,
+      0.0010000000474974513,
+      0.009999999776482582
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": 0.21752113103866577,
+    "metrics": {
+      "steps": 7500,
+      "duration_s": 15.000000000001679,
+      "distance_x_m": 13.055727668089345,
+      "mean_speed_mps": 0.8703818445391922,
+      "min_height_m": 0.6140211118128254,
+      "max_tilt_deg": 6.301980424220849,
+      "fallen": false,
+      "fall_time_s": null,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.019846679642796516,
+      "stl_robustness": 0.21752113103866577,
+      "stl_height_robustness": 0.21752113103866577,
+      "stl_tilt_robustness": 38.698020935058594
+    }
+  },
+  {
+    "rank": 7,
+    "params": [
+      0.4173758924007416,
+      -0.37303075194358826,
+      0.2265215367078781,
+      0.20000000298023224,
+      0.0010000000474974513,
+      9.999999747378752e-06
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": 0.21958720684051514,
+    "metrics": {
+      "steps": 7500,
+      "duration_s": 15.000000000001679,
+      "distance_x_m": 13.057594889119107,
+      "mean_speed_mps": 0.8705063259411764,
+      "min_height_m": 0.6160871819968591,
+      "max_tilt_deg": 6.334811476474418,
+      "fallen": false,
+      "fall_time_s": null,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.020169315859675407,
+      "stl_robustness": 0.21958720684051514,
+      "stl_height_robustness": 0.21958720684051514,
+      "stl_tilt_robustness": 38.66518783569336
+    }
+  },
+  {
+    "rank": 8,
+    "params": [
+      -1.1791991608756103,
+      -0.03283533852454662,
+      -1.5182998050071508,
+      0.484173751379785,
+      0.019999999552965164,
+      9.999999747378752e-06
+    ],
+    "param_names": [
+      "push_fx",
+      "push_fy",
+      "push_fz",
+      "fric_mu1",
+      "fric_mu2",
+      "fric_mu3"
+    ],
+    "robustness": 0.21958720684051514,
+    "metrics": {
+      "steps": 7500,
+      "duration_s": 15.000000000001679,
+      "distance_x_m": 13.051194220442227,
+      "mean_speed_mps": 0.8700796146960511,
+      "min_height_m": 0.6160871819968591,
+      "max_tilt_deg": 6.339421527921046,
+      "fallen": false,
+      "fall_time_s": null,
+      "min_stability_margin": 0.0,
+      "mean_stability_margin": 0.01829843409359455,
+      "stl_robustness": 0.21958720684051514,
+      "stl_height_robustness": 0.21958720684051514,
+      "stl_tilt_robustness": 38.660579681396484
+    }
+  }
+]

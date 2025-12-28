@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+mujoco
+numpy
+PyYAML
+torch
+matplotlib
