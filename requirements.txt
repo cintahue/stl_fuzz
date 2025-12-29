@@ -4,3 +4,6 @@ numpy
 PyYAML
 torch
 matplotlib
+auto_LiRPA
+packaging
+setuptools
