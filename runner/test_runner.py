@@ -50,9 +50,16 @@ class WalkingTestRunner:
             obs_attacks=obs_attacks,
         )
 
-    def run_episode(self) -> EpisodeResult:
+    def run_episode(
+        self,
+        joint_pos_offset: Optional[np.ndarray] = None,
+        joint_vel_offset: Optional[np.ndarray] = None,
+    ) -> EpisodeResult:
         max_steps = int(self.config.simulation_duration / self.config.simulation_dt)
-        state = self.env.reset()
+        if joint_pos_offset is not None or joint_vel_offset is not None:
+            state = self.env.reset_with_perturbation(joint_pos_offset, joint_vel_offset)
+        else:
+            state = self.env.reset()
         self.metrics.reset(state)
 
         if self.render:
@@ -73,6 +80,68 @@ class WalkingTestRunner:
         else:
             for _ in range(max_steps):
                 state = self.env.step()
+                self.metrics.update(state)
+                if self.stop_on_fall and self.metrics.fallen:
+                    break
+
+        metrics = self.metrics.finalize(state)
+        height_threshold = max(
+            self.metrics.min_height_abs,
+            float(self.metrics.start_state.base_pos[2]) * self.metrics.min_height_ratio,
+        )
+        stl_spec = WalkingSTLSpec(
+            height_threshold=height_threshold,
+            max_tilt_deg=self.metrics.max_tilt_deg,
+        )
+        stl_result = stl_spec.evaluate(self.metrics.build_trace())
+        metrics["stl_robustness"] = stl_result.robustness
+        metrics["stl_height_robustness"] = stl_result.details.get("height_robustness")
+        metrics["stl_tilt_robustness"] = stl_result.details.get("tilt_robustness")
+        return EpisodeResult(
+            metrics=metrics,
+            stl={
+                "ok": stl_result.ok,
+                "robustness": stl_result.robustness,
+                **stl_result.details,
+            },
+        )
+
+    def run_episode_with_midpoint_perturbation(
+        self,
+        perturbation_time: float,
+        joint_pos_offset: Optional[np.ndarray] = None,
+        joint_vel_offset: Optional[np.ndarray] = None,
+    ) -> EpisodeResult:
+        max_steps = int(self.config.simulation_duration / self.config.simulation_dt)
+        state = self.env.reset()
+        self.metrics.reset(state)
+
+        applied = False
+
+        if self.render:
+            with mujoco.viewer.launch_passive(self.env.model, self.env.data) as viewer:
+                for _ in range(max_steps):
+                    step_start = time.time()
+                    state = self.env.step()
+                    if not applied and state.time >= perturbation_time:
+                        self.env.apply_joint_perturbation(joint_pos_offset, joint_vel_offset)
+                        applied = True
+                    self.metrics.update(state)
+                    viewer.sync()
+                    if self.stop_on_fall and self.metrics.fallen:
+                        break
+                    if self.real_time:
+                        time_until_next = self.config.simulation_dt - (time.time() - step_start)
+                        if time_until_next > 0:
+                            time.sleep(time_until_next)
+                    if not viewer.is_running():
+                        break
+        else:
+            for _ in range(max_steps):
+                state = self.env.step()
+                if not applied and state.time >= perturbation_time:
+                    self.env.apply_joint_perturbation(joint_pos_offset, joint_vel_offset)
+                    applied = True
                 self.metrics.update(state)
                 if self.stop_on_fall and self.metrics.fallen:
                     break
