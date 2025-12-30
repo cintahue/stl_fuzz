@@ -9,7 +9,8 @@ import mujoco.viewer
 
 from robostl.core.config import DeployConfig
 from robostl.metrics.basic_walking import WalkingMetrics
-from robostl.specs.stl_evaluator import WalkingSTLSpec
+from robostl.specs.spec_config import SpecConfig
+from robostl.specs.walking_specs import CompositeWalkingSpec
 from robostl.sim.g1_env import G1MujocoRunner
 from robostl.policies.torchscript import TorchScriptPolicy
 from robostl.tasks.walking import WalkingTask
@@ -61,13 +62,23 @@ class WalkingTestRunner:
         else:
             state = self.env.reset()
         self.metrics.reset(state)
+        prev_action = self.env.action.copy()
 
         if self.render:
             with mujoco.viewer.launch_passive(self.env.model, self.env.data) as viewer:
                 for _ in range(max_steps):
                     step_start = time.time()
                     state = self.env.step()
-                    self.metrics.update(state)
+                    self.metrics.update(
+                        state,
+                        self.env.model,
+                        self.env.data,
+                        self.env.data.ctrl,
+                        self.env.cmd,
+                        prev_action,
+                        self.env._ground_geom_ids,
+                    )
+                    prev_action = state.action.copy()
                     viewer.sync()
                     if self.stop_on_fall and self.metrics.fallen:
                         break
@@ -80,30 +91,50 @@ class WalkingTestRunner:
         else:
             for _ in range(max_steps):
                 state = self.env.step()
-                self.metrics.update(state)
+                self.metrics.update(
+                    state,
+                    self.env.model,
+                    self.env.data,
+                    self.env.data.ctrl,
+                    self.env.cmd,
+                    prev_action,
+                    self.env._ground_geom_ids,
+                )
+                prev_action = state.action.copy()
                 if self.stop_on_fall and self.metrics.fallen:
                     break
 
         metrics = self.metrics.finalize(state)
+        spec_config = SpecConfig.from_dict(getattr(self.config, "stl_config", None))
         height_threshold = max(
-            self.metrics.min_height_abs,
+            spec_config.h_min,
             float(self.metrics.start_state.base_pos[2]) * self.metrics.min_height_ratio,
         )
-        stl_spec = WalkingSTLSpec(
-            height_threshold=height_threshold,
-            max_tilt_deg=self.metrics.max_tilt_deg,
-        )
+        spec_config.h_min = height_threshold
+        stl_spec = CompositeWalkingSpec(spec_config)
         stl_result = stl_spec.evaluate(self.metrics.build_trace())
         metrics["stl_robustness"] = stl_result.robustness
-        metrics["stl_height_robustness"] = stl_result.details.get("height_robustness")
-        metrics["stl_tilt_robustness"] = stl_result.details.get("tilt_robustness")
+        metrics["stl_safety_robustness"] = stl_result.safety.robustness
+        metrics["stl_stability_robustness"] = stl_result.stability.robustness
+        metrics["stl_performance_robustness"] = (
+            stl_result.performance.robustness if stl_result.performance else None
+        )
+        metrics["stl_first_violation_time"] = stl_result.diagnostics.first_violation_time
+        metrics["stl_most_violated_predicate"] = stl_result.diagnostics.most_violated_predicate
+        metrics["stl_details"] = stl_result.to_dict()
+        metrics["stl_height_robustness"] = (
+            stl_result.safety.details.get("height", {}).get("robustness")
+            if stl_result.safety
+            else None
+        )
+        metrics["stl_tilt_robustness"] = (
+            stl_result.safety.details.get("tilt", {}).get("robustness")
+            if stl_result.safety
+            else None
+        )
         return EpisodeResult(
             metrics=metrics,
-            stl={
-                "ok": stl_result.ok,
-                "robustness": stl_result.robustness,
-                **stl_result.details,
-            },
+            stl=stl_result.to_dict(),
         )
 
     def run_episode_with_midpoint_perturbation(
@@ -115,6 +146,7 @@ class WalkingTestRunner:
         max_steps = int(self.config.simulation_duration / self.config.simulation_dt)
         state = self.env.reset()
         self.metrics.reset(state)
+        prev_action = self.env.action.copy()
 
         applied = False
 
@@ -126,7 +158,16 @@ class WalkingTestRunner:
                     if not applied and state.time >= perturbation_time:
                         self.env.apply_joint_perturbation(joint_pos_offset, joint_vel_offset)
                         applied = True
-                    self.metrics.update(state)
+                    self.metrics.update(
+                        state,
+                        self.env.model,
+                        self.env.data,
+                        self.env.data.ctrl,
+                        self.env.cmd,
+                        prev_action,
+                        self.env._ground_geom_ids,
+                    )
+                    prev_action = state.action.copy()
                     viewer.sync()
                     if self.stop_on_fall and self.metrics.fallen:
                         break
@@ -142,28 +183,48 @@ class WalkingTestRunner:
                 if not applied and state.time >= perturbation_time:
                     self.env.apply_joint_perturbation(joint_pos_offset, joint_vel_offset)
                     applied = True
-                self.metrics.update(state)
+                self.metrics.update(
+                    state,
+                    self.env.model,
+                    self.env.data,
+                    self.env.data.ctrl,
+                    self.env.cmd,
+                    prev_action,
+                    self.env._ground_geom_ids,
+                )
+                prev_action = state.action.copy()
                 if self.stop_on_fall and self.metrics.fallen:
                     break
 
         metrics = self.metrics.finalize(state)
+        spec_config = SpecConfig.from_dict(getattr(self.config, "stl_config", None))
         height_threshold = max(
-            self.metrics.min_height_abs,
+            spec_config.h_min,
             float(self.metrics.start_state.base_pos[2]) * self.metrics.min_height_ratio,
         )
-        stl_spec = WalkingSTLSpec(
-            height_threshold=height_threshold,
-            max_tilt_deg=self.metrics.max_tilt_deg,
-        )
+        spec_config.h_min = height_threshold
+        stl_spec = CompositeWalkingSpec(spec_config)
         stl_result = stl_spec.evaluate(self.metrics.build_trace())
         metrics["stl_robustness"] = stl_result.robustness
-        metrics["stl_height_robustness"] = stl_result.details.get("height_robustness")
-        metrics["stl_tilt_robustness"] = stl_result.details.get("tilt_robustness")
+        metrics["stl_safety_robustness"] = stl_result.safety.robustness
+        metrics["stl_stability_robustness"] = stl_result.stability.robustness
+        metrics["stl_performance_robustness"] = (
+            stl_result.performance.robustness if stl_result.performance else None
+        )
+        metrics["stl_first_violation_time"] = stl_result.diagnostics.first_violation_time
+        metrics["stl_most_violated_predicate"] = stl_result.diagnostics.most_violated_predicate
+        metrics["stl_details"] = stl_result.to_dict()
+        metrics["stl_height_robustness"] = (
+            stl_result.safety.details.get("height", {}).get("robustness")
+            if stl_result.safety
+            else None
+        )
+        metrics["stl_tilt_robustness"] = (
+            stl_result.safety.details.get("tilt", {}).get("robustness")
+            if stl_result.safety
+            else None
+        )
         return EpisodeResult(
             metrics=metrics,
-            stl={
-                "ok": stl_result.ok,
-                "robustness": stl_result.robustness,
-                **stl_result.details,
-            },
+            stl=stl_result.to_dict(),
         )

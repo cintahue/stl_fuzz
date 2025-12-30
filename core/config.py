@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ class DeployConfig:
     num_obs: int
     cmd_init: np.ndarray
     ground_geom_names: list[str]
+    stl_config: dict = field(default_factory=dict)
 
     @staticmethod
     def default_config_path() -> Path:
@@ -68,4 +69,5 @@ class DeployConfig:
             num_obs=int(raw["num_obs"]),
             cmd_init=np.array(raw["cmd_init"], dtype=np.float32),
             ground_geom_names=list(raw.get("ground_geom_names", ["terrain", "floor"])),
+            stl_config=dict(raw.get("stl", {})),
         )

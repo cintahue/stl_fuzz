@@ -35,6 +35,7 @@ from robostl.tasks.walking import WalkingTask
 class SeedEntry:
     push: np.ndarray
     friction: np.ndarray
+    cmd: np.ndarray
     phase: float
     push_start: float
     robustness: float
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("robostl/fuzz_outputs"),
+        default=Path("fuzz_outputs"),
         help="Output directory for seed pool and failures.",
     )
     parser.add_argument(
@@ -78,12 +79,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="failures",
         help="Directory for failure cases.",
-    )
-    parser.add_argument(
-        "--random-zero-prob",
-        type=float,
-        default=0.1,
-        help="Probability to zero macro perturbations in random mode.",
     )
     parser.add_argument(
         "--exploit-cap",
@@ -104,6 +99,18 @@ def parse_args() -> argparse.Namespace:
         help="Max push force vector.",
     )
     parser.add_argument(
+        "--cmd-min",
+        type=str,
+        default="-1.0,-0.3,-0.5",
+        help="Min command vector vx,vy,wz.",
+    )
+    parser.add_argument(
+        "--cmd-max",
+        type=str,
+        default="1.0,0.3,0.5",
+        help="Max command vector vx,vy,wz.",
+    )
+    parser.add_argument(
         "--friction-min",
         type=str,
         default="0.2,0.001,0.00001",
@@ -114,12 +121,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="2.0,0.02,0.01",
         help="Max friction vector.",
-    )
-    parser.add_argument(
-        "--friction-default",
-        type=str,
-        default="1.0,0.005,0.0001",
-        help="Default friction vector for zero macro case.",
     )
     parser.add_argument(
         "--phase-step",
@@ -377,7 +378,9 @@ def _mutate_l1(
     push_max: np.ndarray,
     fric_min: np.ndarray,
     fric_max: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+    cmd_min: np.ndarray,
+    cmd_max: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if random.random() < 0.1:
         mode = "keep"
     else:
@@ -385,30 +388,40 @@ def _mutate_l1(
     if mode == "gaussian":
         sigma_push = (push_max - push_min) * 0.1
         sigma_fric = (fric_max - fric_min) * 0.1
+        sigma_cmd = (cmd_max - cmd_min) * 0.1
         push = base.push + np.random.normal(0.0, sigma_push)
         friction = base.friction + np.random.normal(0.0, sigma_fric)
+        cmd = base.cmd + np.random.normal(0.0, sigma_cmd)
     elif mode == "jump":
         push = base.push.copy()
         friction = base.friction.copy()
+        cmd = base.cmd.copy()
         for idx in random.sample(range(3), k=random.randint(1, 2)):
             push[idx] = random.uniform(push_min[idx], push_max[idx])
         for idx in random.sample(range(3), k=random.randint(1, 2)):
             friction[idx] = random.uniform(fric_min[idx], fric_max[idx])
+        for idx in random.sample(range(3), k=random.randint(1, 2)):
+            cmd[idx] = random.uniform(cmd_min[idx], cmd_max[idx])
     elif mode == "crossover":
         push = base.push.copy()
         friction = base.friction.copy()
+        cmd = base.cmd.copy()
         if pool:
             mate = random.choice([s for s in pool if s is not base] or [base])
             mask_push = np.random.rand(3) < 0.5
             mask_fric = np.random.rand(3) < 0.5
+            mask_cmd = np.random.rand(3) < 0.5
             push[mask_push] = mate.push[mask_push]
             friction[mask_fric] = mate.friction[mask_fric]
+            cmd[mask_cmd] = mate.cmd[mask_cmd]
     else:
         push = base.push.copy()
         friction = base.friction.copy()
+        cmd = base.cmd.copy()
     push = np.clip(push, push_min, push_max)
     friction = np.clip(friction, fric_min, fric_max)
-    return push, friction
+    cmd = np.clip(cmd, cmd_min, cmd_max)
+    return push, friction, cmd
 
 
 def _mutate_phase(
@@ -448,8 +461,12 @@ def _min_distance(
     for other in pool:
         if other is seed:
             continue
-        vec = np.concatenate([seed.push, seed.friction, np.array([seed.phase])])
-        other_vec = np.concatenate([other.push, other.friction, np.array([other.phase])])
+        vec = np.concatenate(
+            [seed.push, seed.friction, np.array([seed.phase])]
+        )
+        other_vec = np.concatenate(
+            [other.push, other.friction, np.array([other.phase])]
+        )
         diff = (vec - other_vec) * weights
         distances.append(float(np.linalg.norm(diff)))
     return float(min(distances)) if distances else 0.0
@@ -489,6 +506,7 @@ def _load_seed_pool(seed_dir: Path) -> list[SeedEntry]:
             SeedEntry(
                 push=np.array(entry["push"], dtype=np.float32),
                 friction=np.array(entry["friction"], dtype=np.float32),
+                cmd=np.array(entry.get("cmd", [1.0, 0.0, 0.0]), dtype=np.float32),
                 phase=float(entry["phase"]),
                 push_start=float(entry["push_start"]),
                 robustness=float(entry["robustness"]),
@@ -512,6 +530,7 @@ def _save_seed_pool(seed_dir: Path, seed_pool: list[SeedEntry]) -> None:
         payload = {
             "push": seed.push.tolist(),
             "friction": seed.friction.tolist(),
+            "cmd": seed.cmd.tolist(),
             "phase": seed.phase,
             "push_start": seed.push_start,
             "robustness": seed.robustness,
@@ -535,9 +554,10 @@ def main() -> None:
 
     push_min = _parse_vec(args.push_min, 3)
     push_max = _parse_vec(args.push_max, 3)
+    cmd_min = _parse_vec(args.cmd_min, 3)
+    cmd_max = _parse_vec(args.cmd_max, 3)
     fric_min = _parse_vec(args.friction_min, 3)
     fric_max = _parse_vec(args.friction_max, 3)
-    fric_default = _parse_vec(args.friction_default, 3)
 
     weights = np.concatenate(
         [
@@ -598,13 +618,15 @@ def main() -> None:
 
         if use_exploit and seed_pool:
             seed = _select_seed(seed_pool)
-            push, friction = _mutate_l1(
+            push, friction, cmd = _mutate_l1(
                 seed,
                 seed_pool,
                 push_min,
                 push_max,
                 fric_min,
                 fric_max,
+                cmd_min,
+                cmd_max,
             )
             phase_mode = random.choice(["util", "random", "crossover"])
             mate_phase = None
@@ -619,15 +641,13 @@ def main() -> None:
                 mate_phase=mate_phase,
             )
         else:
-            if random.random() < args.random_zero_prob:
-                push = np.zeros(3, dtype=np.float32)
-                friction = fric_default.copy()
-            else:
-                push = np.random.uniform(push_min, push_max).astype(np.float32)
-                friction = np.random.uniform(fric_min, fric_max).astype(np.float32)
+            push = np.random.uniform(push_min, push_max).astype(np.float32)
+            friction = np.random.uniform(fric_min, fric_max).astype(np.float32)
+            cmd = np.random.uniform(cmd_min, cmd_max).astype(np.float32)
             phase_mode = "grid"
             phases = [i * args.phase_step for i in range(int(1.0 / args.phase_step) + 1)]
 
+        runner_l2.env.cmd = cmd.copy()
         period, cycle_start = _probe_phase(
             runner_l2,
             friction=friction,
@@ -650,7 +670,8 @@ def main() -> None:
         )
         push_start = _phase_to_time(best_phase, period, cycle_start, args.settle_time)
 
-        refined_robustness, best_perturbation, sensitivity_history = searcher.search(
+        runner_l2.env.cmd = cmd.copy()
+        refined_robustness, best_perturbation, sensitivity_history, best_episode = searcher.search(
             base_push=push,
             base_friction=friction,
             base_push_start=push_start,
@@ -658,7 +679,9 @@ def main() -> None:
             push_body=args.push_body,
         )
 
-        vec = np.concatenate([push, friction, np.array([best_phase], dtype=np.float32)])
+        vec = np.concatenate(
+            [push, friction, np.array([best_phase], dtype=np.float32)]
+        )
         distance = _weighted_distance(vec, seed_pool, weights)
         rob_vals = [s.robustness for s in seed_pool] + [refined_robustness]
         dist_vals = [
@@ -689,6 +712,7 @@ def main() -> None:
         new_seed = SeedEntry(
             push=push,
             friction=friction,
+            cmd=cmd,
             phase=best_phase,
             push_start=push_start,
             robustness=refined_robustness,
@@ -712,11 +736,9 @@ def main() -> None:
                     "iteration": iteration,
                     "mode": "exploit" if use_exploit else "random",
                     "exploit_ratio": exploit_ratio,
-                    "random_zero_macro": bool(
-                        not use_exploit and np.allclose(push, 0.0)
-                    ),
                     "push": push.tolist(),
                     "friction": friction.tolist(),
+                    "cmd": cmd.tolist(),
                     "phase": best_phase,
                     "push_start": push_start,
                     "push_duration": args.push_duration,
@@ -733,6 +755,7 @@ def main() -> None:
                     "robustness": refined_robustness,
                     "keep_score": new_seed.keep_score,
                     "sensitivity": sensitivity_summary,
+                    "stl_details": best_episode.stl if best_episode is not None else None,
                     "search_config": {
                         "epsilon": args.epsilon,
                         "prescan_samples": args.prescan_samples,

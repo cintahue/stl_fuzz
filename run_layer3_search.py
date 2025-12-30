@@ -37,7 +37,7 @@ from robostl.attacks.force import ForcePerturbation
 from robostl.attacks.terrain import FloorFrictionModifier
 from robostl.core.config import DeployConfig
 from robostl.policies.torchscript import TorchScriptPolicy
-from robostl.runner.test_runner import WalkingTestRunner
+from robostl.runner.test_runner import EpisodeResult, WalkingTestRunner
 from robostl.search.cmaes import CMAES
 from robostl.tasks.walking import WalkingTask
 
@@ -411,7 +411,7 @@ class Layer3StateSearcher:
         base_push_start: float,
         push_duration: float,
         push_body: str,
-    ) -> Tuple[float, np.ndarray, List[SensitivityResult]]:
+    ) -> Tuple[float, np.ndarray, List[SensitivityResult], Optional[EpisodeResult]]:
         """
         执行状态空间搜索
         
@@ -444,10 +444,11 @@ class Layer3StateSearcher:
         print("  [Phase 3] CMA-ES local search...")
         best_robustness = float("inf")
         best_perturbation = np.zeros(self.state_dim)
+        best_episode: Optional[EpisodeResult] = None
         search_trajectory = []
         
         for obs, sens in high_risk_states:
-            robustness, perturbation = self._local_search(
+            robustness, perturbation, episode = self._local_search(
                 obs, sens,
                 base_push, base_friction, base_push_start,
                 push_duration, push_body
@@ -457,9 +458,10 @@ class Layer3StateSearcher:
             if robustness < best_robustness:
                 best_robustness = robustness
                 best_perturbation = perturbation
+                best_episode = episode
                 print(f"    New best: {robustness:.4f}")
         
-        return best_robustness, best_perturbation, [s for _, s in sensitivity_samples]
+        return best_robustness, best_perturbation, [s for _, s in sensitivity_samples], best_episode
     
     def _prescan_sensitivity(
         self,
@@ -528,7 +530,7 @@ class Layer3StateSearcher:
         base_push_start: float,
         push_duration: float,
         push_body: str,
-    ) -> Tuple[float, np.ndarray]:
+    ) -> Tuple[float, np.ndarray, Optional[EpisodeResult]]:
         """
         在给定状态周围进行CMA-ES局部搜索
         
@@ -566,6 +568,7 @@ class Layer3StateSearcher:
         
         best_robustness = float("inf")
         best_perturbation = mean.copy()
+        best_episode: Optional[EpisodeResult] = None
         
         for _ in range(self.config.local_iterations):
             candidates = optimizer.ask()
@@ -573,7 +576,7 @@ class Layer3StateSearcher:
             
             for idx, perturbation in enumerate(candidates):
                 # 评估扰动后的鲁棒性
-                robustness = self._evaluate_perturbation(
+                robustness, episode = self._evaluate_perturbation(
                     perturbation,
                     base_push, base_friction, base_push_start,
                     push_duration, push_body
@@ -583,10 +586,11 @@ class Layer3StateSearcher:
                 if robustness < best_robustness:
                     best_robustness = robustness
                     best_perturbation = perturbation.copy()
+                    best_episode = episode
             
             optimizer.tell(losses)
         
-        return best_robustness, best_perturbation
+        return best_robustness, best_perturbation, best_episode
     
     def _evaluate_perturbation(
         self,
@@ -596,7 +600,7 @@ class Layer3StateSearcher:
         base_push_start: float,
         push_duration: float,
         push_body: str,
-    ) -> float:
+    ) -> Tuple[float, EpisodeResult]:
         """评估状态扰动的鲁棒性"""
         pos_offset = perturbation[: self.num_joints]
         vel_offset = perturbation[self.num_joints :]
@@ -613,8 +617,8 @@ class Layer3StateSearcher:
             joint_pos_offset=pos_offset,
             joint_vel_offset=vel_offset,
         )
-        
-        return float(result.metrics.get("stl_robustness", 0.0))
+
+        return float(result.metrics.get("stl_robustness", 0.0)), result
 
     def _apply_sensitivity_guidance(
         self,
@@ -775,7 +779,7 @@ def main() -> None:
         original_robustness = best.get("robustness", 0.0)
         
         # 执行搜索
-        refined_robustness, best_perturbation, sensitivity_history = searcher.search(
+        refined_robustness, best_perturbation, sensitivity_history, _best_episode = searcher.search(
             base_push=push,
             base_friction=friction,
             base_push_start=push_start,

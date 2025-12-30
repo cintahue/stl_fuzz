@@ -195,6 +195,10 @@ def _extract_attack(entry: dict) -> tuple[np.ndarray, np.ndarray, float, float, 
     return push, friction, push_start, push_duration, push_body
 
 
+def _extract_cmd(entry: dict) -> np.ndarray:
+    return np.array(entry.get("cmd", [1.0, 0.0, 0.0]), dtype=np.float32)
+
+
 def _attack_direction(
     module: torch.jit.ScriptModule,
     obs: np.ndarray,
@@ -367,16 +371,31 @@ def _plot_analysis(
     perturb = result.get("perturbation", {})
     sensitivity = result.get("sensitivity") or "N/A"
     ranking = result.get("nonlinearity_ranking") or []
+    diagnostics = (result.get("stl_details") or {}).get("diagnostics", {})
+    violations = diagnostics.get("violation_sequence") or []
+    if isinstance(violations, list) and violations:
+        short = []
+        for item in violations[:3]:
+            time_val = item.get("time")
+            pred = item.get("predicate")
+            if time_val is None or pred is None:
+                continue
+            short.append(f"{float(time_val):.3f}:{pred}")
+        violation_text = ", ".join(short) if short else "N/A"
+    else:
+        violation_text = "N/A"
     top_dims = [r.get("dim") for r in ranking[:3] if "dim" in r]
     info_lines = [
         f"robustness: {result.get('robustness')}",
         f"phase: {attack.get('phase')}",
         f"push: {attack.get('push')}",
         f"friction: {attack.get('friction')}",
+        f"cmd: {result.get('cmd')}",
         f"push_start: {attack.get('push_start')}",
         f"keep_score: {result.get('keep_score')}",
         f"sensitivity: {sensitivity}",
         f"top_dims: {top_dims}",
+        f"violations: {violation_text}",
         f"pos_offset: {perturb.get('joint_pos_offset')}",
         f"vel_offset: {perturb.get('joint_vel_offset')}",
     ]
@@ -433,6 +452,7 @@ def main() -> None:
         )
 
         push, friction, push_start, push_duration, push_body = _extract_attack(entry)
+        cmd = _extract_cmd(entry)
         joint_pos_offset = (
             np.array(entry.get("joint_pos_offset"), dtype=np.float32)
             if entry.get("joint_pos_offset") is not None
@@ -446,6 +466,7 @@ def main() -> None:
 
         attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
         runner.env.attacks = attacks
+        runner.env.cmd = cmd.copy()
 
         t_star = max(0.0, float(push_start) + args.observe_offset)
         obs = _run_to_time_with_perturbation(
@@ -480,6 +501,7 @@ def main() -> None:
                 "push_body": push_body,
                 "phase": entry.get("phase"),
             },
+            "cmd": cmd.tolist(),
             "perturbation": {
                 "joint_pos_offset": joint_pos_offset.tolist()
                 if joint_pos_offset is not None
@@ -489,6 +511,7 @@ def main() -> None:
                 else None,
             },
             "sensitivity": entry.get("sensitivity", {}),
+            "stl_details": entry.get("stl_details"),
             "observation": obs.tolist(),
             "attack_direction": direction,
             "exactline": line_scan,

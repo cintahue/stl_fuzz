@@ -7,6 +7,7 @@ if __package__ is None:
     sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of episodes to run.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("walking_test_results.json"),
+        help="Output JSON file for results.",
     )
     parser.add_argument(
         "--stop-on-fall",
@@ -237,22 +244,43 @@ def main() -> None:
     for idx in range(args.episodes):
         result = runner.run_episode()
         results.append({**result.metrics, "stl": result.stl})
-        print(f"Episode {idx + 1}: {result.metrics} | STL: {result.stl}")
 
-    if len(results) > 1:
-        mean_speed = float(np.mean([r["mean_speed_mps"] for r in results]))
-        mean_distance = float(np.mean([r["distance_x_m"] for r in results]))
-        fall_rate = float(np.mean([1.0 if r["fallen"] else 0.0 for r in results]))
-        stl_ok_rate = float(np.mean([1.0 if r["stl"]["ok"] else 0.0 for r in results]))
-        stl_robustness = float(np.mean([r["stl"]["robustness"] for r in results]))
-        print(
-            "Aggregate: "
-            f"mean_speed_mps={mean_speed:.3f}, "
-            f"mean_distance_x_m={mean_distance:.3f}, "
-            f"fall_rate={fall_rate:.2f}, "
-            f"stl_ok_rate={stl_ok_rate:.2f}, "
-            f"stl_robustness={stl_robustness:.4f}"
-        )
+    mean_speed = float(np.mean([r["mean_speed_mps"] for r in results]))
+    mean_distance = float(np.mean([r["distance_x_m"] for r in results]))
+    fall_rate = float(np.mean([1.0 if r["fallen"] else 0.0 for r in results]))
+    stl_ok_rate = float(np.mean([1.0 if r["stl"]["ok"] else 0.0 for r in results]))
+    stl_robustness = float(np.mean([r["stl"]["robustness"] for r in results]))
+
+    def _jsonify(obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+        if isinstance(obj, dict):
+            return {k: _jsonify(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_jsonify(v) for v in obj]
+        return obj
+
+    payload = {
+        "config": str(args.config),
+        "policy_path": str(args.policy_path) if args.policy_path is not None else None,
+        "episodes": int(args.episodes),
+        "results": results,
+        "aggregate": {
+            "mean_speed_mps": mean_speed,
+            "mean_distance_x_m": mean_distance,
+            "fall_rate": fall_rate,
+            "stl_ok_rate": stl_ok_rate,
+            "stl_robustness": stl_robustness,
+        },
+    }
+    output_path = args.output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(_jsonify(payload), indent=2), encoding="utf-8")
+    print(f"Results saved to {output_path}")
 
 
 if __name__ == "__main__":
