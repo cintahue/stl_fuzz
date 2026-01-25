@@ -26,7 +26,9 @@ if __package__ is None:
 
 import argparse
 import json
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Optional, Tuple, List
 
@@ -62,6 +64,7 @@ class Layer3SearchConfig:
     local_iterations: int = 30
     local_population: int = 16
     local_sigma: float = 0.1
+    parallel_workers: int = 0
     
     # 状态空间边界
     state_perturbation_scale: float = 0.05  # 关节位置扰动幅度
@@ -133,6 +136,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="CMA-ES iterations for local search.",
+    )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=0,
+        help="Parallel workers for CMA-ES candidate evaluation (0=off).",
     )
     parser.add_argument(
         "--epsilon",
@@ -217,6 +226,53 @@ def _restore_memory(
         module.hidden_state.copy_(hidden)
     if hasattr(module, "cell_state"):
         module.cell_state.copy_(cell)
+
+
+def _evaluate_candidate_worker(payload: dict) -> tuple[float, EpisodeResult]:
+    config = payload["config"]
+    policy = TorchScriptPolicy(config.policy_path)
+    task = WalkingTask.from_config(config)
+    runner = WalkingTestRunner(
+        config=config,
+        policy=policy,
+        task=task,
+        stop_on_fall=True,
+        render=False,
+        real_time=False,
+        attacks=[],
+        obs_attacks=None,
+    )
+    push = payload.get("push")
+    friction = payload.get("friction")
+    push_start = payload.get("push_start")
+    push_duration = payload.get("push_duration")
+    push_body = payload.get("push_body")
+    cmd = payload.get("cmd")
+    if cmd is not None:
+        runner.env.cmd = np.array(cmd, dtype=np.float32)
+    attacks = []
+    if friction is not None:
+        attacks.append(FloorFrictionModifier(friction=np.array(friction, dtype=np.float32)))
+    if push is not None:
+        attacks.append(
+            ForcePerturbation(
+                body_name=str(push_body),
+                force=np.array(push, dtype=np.float32),
+                start_time=float(push_start),
+                duration=float(push_duration),
+            )
+        )
+    runner.env.attacks = attacks
+    perturbation = np.array(payload["perturbation"], dtype=np.float32)
+    num_joints = int(config.num_actions)
+    pos_offset = perturbation[:num_joints]
+    vel_offset = perturbation[num_joints:]
+    result = runner.run_episode_with_midpoint_perturbation(
+        perturbation_time=float(push_start),
+        joint_pos_offset=pos_offset,
+        joint_vel_offset=vel_offset,
+    )
+    return float(result.metrics.get("stl_robustness", 0.0)), result
 
 
 def _safe_forward_np(
@@ -570,24 +626,75 @@ class Layer3StateSearcher:
         best_perturbation = mean.copy()
         best_episode: Optional[EpisodeResult] = None
         
+        cmd = self.runner.env.cmd.copy()
+
         for _ in range(self.config.local_iterations):
             candidates = optimizer.ask()
             losses = np.zeros(len(candidates), dtype=np.float32)
-            
-            for idx, perturbation in enumerate(candidates):
-                # 评估扰动后的鲁棒性
-                robustness, episode = self._evaluate_perturbation(
-                    perturbation,
-                    base_push, base_friction, base_push_start,
-                    push_duration, push_body
-                )
-                losses[idx] = robustness
-                
-                if robustness < best_robustness:
-                    best_robustness = robustness
-                    best_perturbation = perturbation.copy()
-                    best_episode = episode
-            
+
+            if self.config.parallel_workers and self.config.parallel_workers > 1:
+                payloads = []
+                for perturbation in candidates:
+                    payloads.append(
+                        {
+                            "config": self.runner.config,
+                            "push": None if base_push is None else base_push.tolist(),
+                            "friction": None if base_friction is None else base_friction.tolist(),
+                            "push_start": float(base_push_start),
+                            "push_duration": float(push_duration),
+                            "push_body": push_body,
+                            "cmd": cmd.tolist(),
+                            "perturbation": perturbation.tolist(),
+                        }
+                    )
+                try:
+                    mp_context = mp.get_context("spawn")
+                    with ProcessPoolExecutor(
+                        max_workers=self.config.parallel_workers,
+                        mp_context=mp_context,
+                    ) as executor:
+                        results = list(executor.map(_evaluate_candidate_worker, payloads))
+                    for idx, (robustness, episode) in enumerate(results):
+                        losses[idx] = robustness
+                        if robustness < best_robustness:
+                            best_robustness = robustness
+                            best_perturbation = candidates[idx].copy()
+                            best_episode = episode
+                except Exception as exc:
+                    print(f"[Layer3] Parallel eval failed, fallback to serial: {exc}")
+                    for idx, perturbation in enumerate(candidates):
+                        robustness, episode = self._evaluate_perturbation(
+                            perturbation,
+                            base_push,
+                            base_friction,
+                            base_push_start,
+                            push_duration,
+                            push_body,
+                            cmd,
+                        )
+                        losses[idx] = robustness
+                        if robustness < best_robustness:
+                            best_robustness = robustness
+                            best_perturbation = perturbation.copy()
+                            best_episode = episode
+            else:
+                for idx, perturbation in enumerate(candidates):
+                    robustness, episode = self._evaluate_perturbation(
+                        perturbation,
+                        base_push,
+                        base_friction,
+                        base_push_start,
+                        push_duration,
+                        push_body,
+                        cmd,
+                    )
+                    losses[idx] = robustness
+
+                    if robustness < best_robustness:
+                        best_robustness = robustness
+                        best_perturbation = perturbation.copy()
+                        best_episode = episode
+
             optimizer.tell(losses)
         
         return best_robustness, best_perturbation, best_episode
@@ -600,6 +707,7 @@ class Layer3StateSearcher:
         base_push_start: float,
         push_duration: float,
         push_body: str,
+        cmd: Optional[np.ndarray],
     ) -> Tuple[float, EpisodeResult]:
         """评估状态扰动的鲁棒性"""
         pos_offset = perturbation[: self.num_joints]
@@ -611,6 +719,9 @@ class Layer3StateSearcher:
         )
         self.runner.env.attacks = attacks
         
+        if cmd is not None:
+            self.runner.env.cmd = cmd.copy()
+
         # 运行仿真：在攻击时刻施加扰动
         result = self.runner.run_episode_with_midpoint_perturbation(
             perturbation_time=base_push_start,
@@ -758,6 +869,7 @@ def main() -> None:
         prescan_samples=args.prescan_samples,
         epsilon=args.epsilon,
         local_iterations=args.local_iterations,
+        parallel_workers=args.parallel_workers,
         state_perturbation_scale=args.state_perturbation_scale,
         vel_perturbation_scale=args.vel_perturbation_scale,
         joint_pos_scales=joint_pos_scales,

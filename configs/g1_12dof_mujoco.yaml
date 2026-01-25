@@ -1,6 +1,6 @@
 policy_path: '{ROBOSTL_ROOT}/assets/models/g1/motion.pt'
 xml_path: '{ROBOSTL_ROOT}/assets/g1_description/scene.xml'
-simulation_duration: 15.0
+simulation_duration: 10.0
 simulation_dt: 0.002
 control_decimation: 10
 kps:

@@ -129,6 +129,12 @@ def parse_args() -> argparse.Namespace:
         help="Phase grid step.",
     )
     parser.add_argument(
+        "--l1-max-resample",
+        type=int,
+        default=5,
+        help="Max resamples when L1 macro causes obvious failure.",
+    )
+    parser.add_argument(
         "--phase-mutation-range",
         type=float,
         default=0.1,
@@ -156,6 +162,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-iterations", type=int, default=30)
     parser.add_argument("--local-population", type=int, default=16)
     parser.add_argument("--local-sigma", type=float, default=0.1)
+    parser.add_argument(
+        "--l3-workers",
+        type=int,
+        default=0,
+        help="Parallel workers for L3 CMA-ES candidate evaluation (0=off).",
+    )
     parser.add_argument("--epsilon", type=float, default=0.02)
     parser.add_argument("--state-perturbation-scale", type=float, default=0.05)
     parser.add_argument("--vel-perturbation-scale", type=float, default=0.02)
@@ -313,9 +325,10 @@ def _evaluate_phases(
     settle_time: float,
     push_duration: float,
     push_body: str,
-) -> tuple[float, float]:
+) -> tuple[float, float, bool]:
     best_phase = phases[0]
     best_robustness = float("inf")
+    best_fallen = False
     for phase in phases:
         push_start = _phase_to_time(phase, period, cycle_start, settle_time)
         attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
@@ -325,7 +338,8 @@ def _evaluate_phases(
         if robustness < best_robustness:
             best_robustness = robustness
             best_phase = phase
-    return best_phase, best_robustness
+            best_fallen = bool(result.metrics.get("fallen", False))
+    return best_phase, best_robustness, best_fallen
 
 
 def _weighted_distance(vec: np.ndarray, pool: list[SeedEntry], weights: np.ndarray) -> float:
@@ -605,6 +619,7 @@ def main() -> None:
         local_iterations=args.local_iterations,
         local_population=args.local_population,
         local_sigma=args.local_sigma,
+        parallel_workers=args.l3_workers,
         state_perturbation_scale=args.state_perturbation_scale,
         vel_perturbation_scale=args.vel_perturbation_scale,
         sensitive_scale_factor=args.sensitive_scale_factor,
@@ -615,59 +630,77 @@ def main() -> None:
     for iteration in range(args.iterations):
         exploit_ratio = min(args.exploit_cap, len(seed_pool) * 0.02)
         use_exploit = random.random() < exploit_ratio
+        attempts = 0
+        skip_iteration = False
+        while True:
+            attempts += 1
+            if use_exploit and seed_pool:
+                seed = _select_seed(seed_pool)
+                push, friction, cmd = _mutate_l1(
+                    seed,
+                    seed_pool,
+                    push_min,
+                    push_max,
+                    fric_min,
+                    fric_max,
+                    cmd_min,
+                    cmd_max,
+                )
+                phase_mode = random.choice(["util", "random", "crossover"])
+                mate_phase = None
+                if phase_mode == "crossover" and len(seed_pool) > 1:
+                    mate = random.choice(
+                        [s for s in seed_pool if s is not seed] or [seed]
+                    )
+                    mate_phase = mate.phase
+                phases = _mutate_phase(
+                    seed.phase,
+                    phase_mode,
+                    args.phase_mutation_samples,
+                    args.phase_mutation_range,
+                    mate_phase=mate_phase,
+                )
+            else:
+                push = np.random.uniform(push_min, push_max).astype(np.float32)
+                friction = np.random.uniform(fric_min, fric_max).astype(np.float32)
+                cmd = np.random.uniform(cmd_min, cmd_max).astype(np.float32)
+                phase_mode = "grid"
+                phases = [
+                    i * args.phase_step for i in range(int(1.0 / args.phase_step) + 1)
+                ]
 
-        if use_exploit and seed_pool:
-            seed = _select_seed(seed_pool)
-            push, friction, cmd = _mutate_l1(
-                seed,
-                seed_pool,
-                push_min,
-                push_max,
-                fric_min,
-                fric_max,
-                cmd_min,
-                cmd_max,
+            runner_l2.env.cmd = cmd.copy()
+            period, cycle_start = _probe_phase(
+                runner_l2,
+                friction=friction,
+                duration_s=args.probe_duration,
+                min_step_duration=args.min_step_duration,
+                min_period=args.min_period,
+                default_period=args.default_period,
             )
-            phase_mode = random.choice(["util", "random", "crossover"])
-            mate_phase = None
-            if phase_mode == "crossover" and len(seed_pool) > 1:
-                mate = random.choice([s for s in seed_pool if s is not seed] or [seed])
-                mate_phase = mate.phase
-            phases = _mutate_phase(
-                seed.phase,
-                phase_mode,
-                args.phase_mutation_samples,
-                args.phase_mutation_range,
-                mate_phase=mate_phase,
+
+            best_phase, best_phase_robustness, best_fallen = _evaluate_phases(
+                runner_l2,
+                push=push,
+                friction=friction,
+                phases=phases,
+                period=period,
+                cycle_start=cycle_start,
+                settle_time=args.settle_time,
+                push_duration=args.push_duration,
+                push_body=args.push_body,
             )
-        else:
-            push = np.random.uniform(push_min, push_max).astype(np.float32)
-            friction = np.random.uniform(fric_min, fric_max).astype(np.float32)
-            cmd = np.random.uniform(cmd_min, cmd_max).astype(np.float32)
-            phase_mode = "grid"
-            phases = [i * args.phase_step for i in range(int(1.0 / args.phase_step) + 1)]
+            if not best_fallen:
+                break
+            if attempts >= args.l1_max_resample:
+                print(
+                    f"[Warning] Iter {iteration+1}: L1 macro caused fall after {attempts} resamples; skipping."
+                )
+                skip_iteration = True
+                break
 
-        runner_l2.env.cmd = cmd.copy()
-        period, cycle_start = _probe_phase(
-            runner_l2,
-            friction=friction,
-            duration_s=args.probe_duration,
-            min_step_duration=args.min_step_duration,
-            min_period=args.min_period,
-            default_period=args.default_period,
-        )
-
-        best_phase, best_phase_robustness = _evaluate_phases(
-            runner_l2,
-            push=push,
-            friction=friction,
-            phases=phases,
-            period=period,
-            cycle_start=cycle_start,
-            settle_time=args.settle_time,
-            push_duration=args.push_duration,
-            push_body=args.push_body,
-        )
+        if skip_iteration:
+            continue
         push_start = _phase_to_time(best_phase, period, cycle_start, args.settle_time)
 
         runner_l2.env.cmd = cmd.copy()
@@ -772,7 +805,6 @@ def main() -> None:
                         "push_max": push_max.tolist(),
                         "friction_min": fric_min.tolist(),
                         "friction_max": fric_max.tolist(),
-                        "friction_default": fric_default.tolist(),
                     },
                     "l2_search": {
                         "phase_step": args.phase_step,
