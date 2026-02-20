@@ -172,12 +172,14 @@ def _build_foot_geom_map(model: mujoco.MjModel) -> dict[int, str]:
 
 def _probe_phase(
     env: WalkingTestRunner,
+    terrain: Optional[dict],
     duration_s: float,
     min_step_duration: float,
     min_period: float,
     default_period: float,
 ) -> PhaseProbeResult:
     runner_env = env.env
+    runner_env.set_terrain(terrain)
     model = runner_env.model
     data = runner_env.data
     ground_geom_ids = resolve_ground_geom_ids(model, env.config.ground_geom_names)
@@ -282,6 +284,8 @@ def _evaluate_entry(
     )
 
     push, friction, names = _extract_params(entry)
+    terrain = entry.get("terrain", {"mode": "flat"})
+    runner.env.set_terrain(terrain)
     base_attacks = _build_attacks(
         push=push,
         friction=friction,
@@ -292,6 +296,7 @@ def _evaluate_entry(
     runner.env.attacks = base_attacks
     probe = _probe_phase(
         runner,
+        terrain,
         args.probe_duration,
         args.min_step_duration,
         args.min_period,
@@ -314,6 +319,7 @@ def _evaluate_entry(
             push_start = cycle_start + float(phase) * probe.period_s
             if push_start + args.push_duration > config.simulation_duration:
                 continue
+        runner.env.set_terrain(terrain)
 
         attacks = _build_attacks(
             push=push,
@@ -345,6 +351,7 @@ def _evaluate_entry(
         "rank": entry.get("rank"),
         "param_names": names,
         "params": entry["params"],
+        "terrain": terrain,
         "probe": {
             "period_s": probe.period_s,
             "raw_period_s": probe.raw_period_s,

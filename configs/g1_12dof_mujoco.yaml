@@ -60,15 +60,15 @@ ground_geom_names:
 - terrain
 - floor
 stl:
-  h_min: 0.6330363396555185
-  max_tilt_deg: 10.11935830116272
-  max_torque: 48.42335681800882
+  h_min: 0.6333062052726746
+  max_tilt_deg: 9.143325567245483
+  max_torque: 43.870223792266856
   zmp_margin: 0.0
   stability_margin: 0.0
-  max_angular_velocity: 1.5676815075874333
-  max_velocity_error: 0.7063298523426056
-  min_foot_clearance: -0.04750015214085579
-  max_action_delta: 1.2413369393348754
+  max_angular_velocity: 1.5596610360145564
+  max_velocity_error: 0.6462790668010712
+  min_foot_clearance: -0.04750008136034012
+  max_action_delta: 1.2395782170295713
   enable_safety: true
   enable_stability: true
   enable_performance: false

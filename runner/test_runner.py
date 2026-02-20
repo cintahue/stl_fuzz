@@ -33,6 +33,7 @@ class WalkingTestRunner:
         render: bool = True,
         real_time: bool = True,
         attacks: Optional[list] = None,
+        terrain: Optional[dict] = None,
         obs_attacks: Optional[list] = None,
     ) -> None:
         self.config = config
@@ -47,6 +48,7 @@ class WalkingTestRunner:
             config=config,
             policy=policy,
             cmd=task.command,
+            terrain=terrain,
             attacks=attacks,
             obs_attacks=obs_attacks,
         )

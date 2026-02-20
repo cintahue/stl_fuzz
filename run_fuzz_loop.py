@@ -36,6 +36,7 @@ class SeedEntry:
     push: np.ndarray
     friction: np.ndarray
     cmd: np.ndarray
+    terrain: dict
     phase: float
     push_start: float
     robustness: float
@@ -123,6 +124,42 @@ def parse_args() -> argparse.Namespace:
         help="Max friction vector.",
     )
     parser.add_argument(
+        "--terrain-modes",
+        type=str,
+        default="flat,pit,bump",
+        help="Comma-separated terrain modes (flat,pit,bump).",
+    )
+    parser.add_argument(
+        "--terrain-center-range",
+        type=str,
+        default="0.5,2.0,-0.5,0.5",
+        help="Terrain center range xmin,xmax,ymin,ymax.",
+    )
+    parser.add_argument(
+        "--terrain-radius-range",
+        type=str,
+        default="0.08,0.2",
+        help="Terrain radius range min,max.",
+    )
+    parser.add_argument(
+        "--terrain-depth-range",
+        type=str,
+        default="0.01,0.05",
+        help="Pit depth range min,max.",
+    )
+    parser.add_argument(
+        "--terrain-height-range",
+        type=str,
+        default="0.01,0.05",
+        help="Bump height range min,max.",
+    )
+    parser.add_argument(
+        "--terrain-baseline",
+        type=float,
+        default=0.5,
+        help="Heightfield baseline level.",
+    )
+    parser.add_argument(
         "--phase-step",
         type=float,
         default=0.05,
@@ -184,6 +221,168 @@ def _parse_vec(value: str, length: int) -> np.ndarray:
     return np.array([float(p) for p in parts], dtype=np.float32)
 
 
+def _parse_range(value: str) -> tuple[float, float]:
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"Expected 2 values, got: {value}")
+    return float(parts[0]), float(parts[1])
+
+
+def _parse_rect(value: str) -> tuple[float, float, float, float]:
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"Expected 4 values, got: {value}")
+    return float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
+
+
+def _sample_terrain(args: argparse.Namespace) -> dict:
+    modes = [m.strip() for m in args.terrain_modes.split(",") if m.strip()]
+    if not modes:
+        return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+    mode = random.choice(modes)
+    if mode == "flat":
+        return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+    x_min, x_max, y_min, y_max = _parse_rect(args.terrain_center_range)
+    r_min, r_max = _parse_range(args.terrain_radius_range)
+    center = [random.uniform(x_min, x_max), random.uniform(y_min, y_max)]
+    radius = random.uniform(r_min, r_max)
+    if mode == "pit":
+        d_min, d_max = _parse_range(args.terrain_depth_range)
+        depth = random.uniform(d_min, d_max)
+        return {
+            "mode": "pit",
+            "center": center,
+            "radius": radius,
+            "depth": depth,
+            "baseline": float(args.terrain_baseline),
+        }
+    if mode == "bump":
+        h_min, h_max = _parse_range(args.terrain_height_range)
+        height = random.uniform(h_min, h_max)
+        return {
+            "mode": "bump",
+            "center": center,
+            "radius": radius,
+            "height": height,
+            "baseline": float(args.terrain_baseline),
+        }
+    return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+
+
+def _mutate_terrain(
+    base: Optional[dict],
+    pool: list[SeedEntry],
+    mode: str,
+    args: argparse.Namespace,
+) -> dict:
+    modes = [m.strip() for m in args.terrain_modes.split(",") if m.strip()]
+    if not modes:
+        return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+
+    terrain = (base.copy() if base else {"mode": "flat"}).copy()
+    terrain.setdefault("baseline", float(args.terrain_baseline))
+    terrain_mode = str(terrain.get("mode", "flat"))
+    if terrain_mode not in modes:
+        terrain_mode = random.choice(modes)
+        terrain["mode"] = terrain_mode
+
+    x_min, x_max, y_min, y_max = _parse_rect(args.terrain_center_range)
+    r_min, r_max = _parse_range(args.terrain_radius_range)
+    d_min, d_max = _parse_range(args.terrain_depth_range)
+    h_min, h_max = _parse_range(args.terrain_height_range)
+
+    def _clamp(val: float, vmin: float, vmax: float) -> float:
+        return float(max(vmin, min(vmax, val)))
+
+    def _sample_for_mode(sel_mode: str) -> dict:
+        if sel_mode == "flat":
+            return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+        center = [
+            random.uniform(x_min, x_max),
+            random.uniform(y_min, y_max),
+        ]
+        radius = random.uniform(r_min, r_max)
+        if sel_mode == "pit":
+            depth = random.uniform(d_min, d_max)
+            return {
+                "mode": "pit",
+                "center": center,
+                "radius": radius,
+                "depth": depth,
+                "baseline": float(args.terrain_baseline),
+            }
+        if sel_mode == "bump":
+            height = random.uniform(h_min, h_max)
+            return {
+                "mode": "bump",
+                "center": center,
+                "radius": radius,
+                "height": height,
+                "baseline": float(args.terrain_baseline),
+            }
+        return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+
+    if mode == "keep":
+        return terrain
+
+    if mode == "jump":
+        sel_mode = random.choice(modes)
+        return _sample_for_mode(sel_mode)
+
+    if mode == "crossover" and pool:
+        mate = random.choice(pool)
+        mate_terrain = mate.terrain.copy() if mate.terrain else {"mode": "flat"}
+        mate_mode = str(mate_terrain.get("mode", "flat"))
+        if mate_mode not in modes:
+            mate_mode = random.choice(modes)
+        if mate_mode != terrain_mode:
+            return mate_terrain if random.random() < 0.5 else terrain
+        if terrain_mode == "flat":
+            return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+        merged = terrain.copy()
+        if random.random() < 0.5:
+            merged["center"] = mate_terrain.get("center", merged.get("center"))
+        if random.random() < 0.5:
+            merged["radius"] = mate_terrain.get("radius", merged.get("radius"))
+        if terrain_mode == "pit":
+            if random.random() < 0.5:
+                merged["depth"] = mate_terrain.get("depth", merged.get("depth"))
+        if terrain_mode == "bump":
+            if random.random() < 0.5:
+                merged["height"] = mate_terrain.get("height", merged.get("height"))
+        terrain = merged
+        mode = "gaussian"
+
+    if mode == "gaussian":
+        if terrain_mode == "flat":
+            if len(modes) > 1 and random.random() < 0.3:
+                return _sample_for_mode(random.choice(modes))
+            return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+        center = terrain.get("center", [1.0, 0.0])
+        radius = float(terrain.get("radius", 0.15))
+        sigma_x = (x_max - x_min) * 0.1
+        sigma_y = (y_max - y_min) * 0.1
+        sigma_r = (r_max - r_min) * 0.1
+        new_center = [
+            _clamp(center[0] + random.gauss(0.0, sigma_x), x_min, x_max),
+            _clamp(center[1] + random.gauss(0.0, sigma_y), y_min, y_max),
+        ]
+        new_radius = _clamp(radius + random.gauss(0.0, sigma_r), r_min, r_max)
+        terrain["center"] = new_center
+        terrain["radius"] = new_radius
+        if terrain_mode == "pit":
+            depth = float(terrain.get("depth", 0.03))
+            sigma_d = (d_max - d_min) * 0.1
+            terrain["depth"] = _clamp(depth + random.gauss(0.0, sigma_d), d_min, d_max)
+        if terrain_mode == "bump":
+            height = float(terrain.get("height", 0.03))
+            sigma_h = (h_max - h_min) * 0.1
+            terrain["height"] = _clamp(height + random.gauss(0.0, sigma_h), h_min, h_max)
+        terrain["baseline"] = float(args.terrain_baseline)
+        return terrain
+
+    return terrain
+
 def _build_attacks(
     push: Optional[np.ndarray],
     friction: Optional[np.ndarray],
@@ -230,11 +429,13 @@ def _build_foot_geom_map(model: mujoco.MjModel) -> dict[int, str]:
 def _probe_phase(
     runner: WalkingTestRunner,
     friction: Optional[np.ndarray],
+    terrain: Optional[dict],
     duration_s: float,
     min_step_duration: float,
     min_period: float,
     default_period: float,
 ) -> tuple[float, float]:
+    runner.env.set_terrain(terrain)
     runner.env.attacks = _build_attacks(
         push=None,
         friction=friction,
@@ -325,7 +526,9 @@ def _evaluate_phases(
     settle_time: float,
     push_duration: float,
     push_body: str,
+    terrain: Optional[dict],
 ) -> tuple[float, float, bool]:
+    runner.env.set_terrain(terrain)
     best_phase = phases[0]
     best_robustness = float("inf")
     best_fallen = False
@@ -394,7 +597,8 @@ def _mutate_l1(
     fric_max: np.ndarray,
     cmd_min: np.ndarray,
     cmd_max: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     if random.random() < 0.1:
         mode = "keep"
     else:
@@ -435,7 +639,8 @@ def _mutate_l1(
     push = np.clip(push, push_min, push_max)
     friction = np.clip(friction, fric_min, fric_max)
     cmd = np.clip(cmd, cmd_min, cmd_max)
-    return push, friction, cmd
+    terrain = _mutate_terrain(base.terrain, pool, mode, args)
+    return push, friction, cmd, terrain
 
 
 def _mutate_phase(
@@ -521,6 +726,7 @@ def _load_seed_pool(seed_dir: Path) -> list[SeedEntry]:
                 push=np.array(entry["push"], dtype=np.float32),
                 friction=np.array(entry["friction"], dtype=np.float32),
                 cmd=np.array(entry.get("cmd", [1.0, 0.0, 0.0]), dtype=np.float32),
+                terrain=entry.get("terrain", {"mode": "flat"}),
                 phase=float(entry["phase"]),
                 push_start=float(entry["push_start"]),
                 robustness=float(entry["robustness"]),
@@ -545,6 +751,7 @@ def _save_seed_pool(seed_dir: Path, seed_pool: list[SeedEntry]) -> None:
             "push": seed.push.tolist(),
             "friction": seed.friction.tolist(),
             "cmd": seed.cmd.tolist(),
+            "terrain": seed.terrain,
             "phase": seed.phase,
             "push_start": seed.push_start,
             "robustness": seed.robustness,
@@ -636,7 +843,7 @@ def main() -> None:
             attempts += 1
             if use_exploit and seed_pool:
                 seed = _select_seed(seed_pool)
-                push, friction, cmd = _mutate_l1(
+                push, friction, cmd, terrain = _mutate_l1(
                     seed,
                     seed_pool,
                     push_min,
@@ -645,6 +852,7 @@ def main() -> None:
                     fric_max,
                     cmd_min,
                     cmd_max,
+                    args,
                 )
                 phase_mode = random.choice(["util", "random", "crossover"])
                 mate_phase = None
@@ -664,6 +872,7 @@ def main() -> None:
                 push = np.random.uniform(push_min, push_max).astype(np.float32)
                 friction = np.random.uniform(fric_min, fric_max).astype(np.float32)
                 cmd = np.random.uniform(cmd_min, cmd_max).astype(np.float32)
+                terrain = _sample_terrain(args)
                 phase_mode = "grid"
                 phases = [
                     i * args.phase_step for i in range(int(1.0 / args.phase_step) + 1)
@@ -673,6 +882,7 @@ def main() -> None:
             period, cycle_start = _probe_phase(
                 runner_l2,
                 friction=friction,
+                terrain=terrain,
                 duration_s=args.probe_duration,
                 min_step_duration=args.min_step_duration,
                 min_period=args.min_period,
@@ -689,6 +899,7 @@ def main() -> None:
                 settle_time=args.settle_time,
                 push_duration=args.push_duration,
                 push_body=args.push_body,
+                terrain=terrain,
             )
             if not best_fallen:
                 break
@@ -710,6 +921,7 @@ def main() -> None:
             base_push_start=push_start,
             push_duration=args.push_duration,
             push_body=args.push_body,
+            terrain=terrain,
         )
 
         vec = np.concatenate(
@@ -746,6 +958,7 @@ def main() -> None:
             push=push,
             friction=friction,
             cmd=cmd,
+            terrain=terrain,
             phase=best_phase,
             push_start=push_start,
             robustness=refined_robustness,
@@ -772,6 +985,7 @@ def main() -> None:
                     "push": push.tolist(),
                     "friction": friction.tolist(),
                     "cmd": cmd.tolist(),
+                    "terrain": terrain,
                     "phase": best_phase,
                     "push_start": push_start,
                     "push_duration": args.push_duration,

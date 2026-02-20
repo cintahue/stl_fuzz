@@ -248,8 +248,10 @@ def _evaluate_candidate_worker(payload: dict) -> tuple[float, EpisodeResult]:
     push_duration = payload.get("push_duration")
     push_body = payload.get("push_body")
     cmd = payload.get("cmd")
+    terrain = payload.get("terrain")
     if cmd is not None:
         runner.env.cmd = np.array(cmd, dtype=np.float32)
+    runner.env.set_terrain(terrain)
     attacks = []
     if friction is not None:
         attacks.append(FloorFrictionModifier(friction=np.array(friction, dtype=np.float32)))
@@ -448,6 +450,7 @@ class Layer3StateSearcher:
         self.runner = runner
         self.analyzer = analyzer
         self.config = config
+        self._terrain: Optional[dict] = None
         
         # 状态空间维度 (关节位置 + 关节速度)
         self.num_joints = self.runner.config.num_actions
@@ -467,6 +470,7 @@ class Layer3StateSearcher:
         base_push_start: float,
         push_duration: float,
         push_body: str,
+        terrain: Optional[dict] = None,
     ) -> Tuple[float, np.ndarray, List[SensitivityResult], Optional[EpisodeResult]]:
         """
         执行状态空间搜索
@@ -477,12 +481,15 @@ class Layer3StateSearcher:
             base_push_start: 基础攻击时刻
             push_duration: 推力持续时间
             push_body: 推力作用点
+            terrain: L1地形配置（pit/bump/flat）
         
         Returns:
             best_robustness: 找到的最低鲁棒性
             best_perturbation: 最佳状态扰动
             sensitivity_history: 灵敏度分析历史
         """
+        self._set_terrain(terrain)
+
         # Phase 1: 灵敏度预扫描
         print("  [Phase 1] Sensitivity prescan...")
         sensitivity_samples = self._prescan_sensitivity(
@@ -518,6 +525,10 @@ class Layer3StateSearcher:
                 print(f"    New best: {robustness:.4f}")
         
         return best_robustness, best_perturbation, [s for _, s in sensitivity_samples], best_episode
+
+    def _set_terrain(self, terrain: Optional[dict]) -> None:
+        self._terrain = terrain.copy() if terrain is not None else None
+        self.runner.env.set_terrain(self._terrain)
     
     def _prescan_sensitivity(
         self,
@@ -534,6 +545,7 @@ class Layer3StateSearcher:
         """
         samples = []
         
+        self._set_terrain(self._terrain)
         # 设置攻击
         attacks = self._build_attacks(
             base_push, base_friction, base_push_start, push_duration, push_body
@@ -627,6 +639,7 @@ class Layer3StateSearcher:
         best_episode: Optional[EpisodeResult] = None
         
         cmd = self.runner.env.cmd.copy()
+        terrain = self._terrain.copy() if self._terrain is not None else None
 
         for _ in range(self.config.local_iterations):
             candidates = optimizer.ask()
@@ -644,6 +657,7 @@ class Layer3StateSearcher:
                             "push_duration": float(push_duration),
                             "push_body": push_body,
                             "cmd": cmd.tolist(),
+                            "terrain": terrain,
                             "perturbation": perturbation.tolist(),
                         }
                     )
@@ -671,6 +685,7 @@ class Layer3StateSearcher:
                             push_duration,
                             push_body,
                             cmd,
+                            terrain,
                         )
                         losses[idx] = robustness
                         if robustness < best_robustness:
@@ -687,6 +702,7 @@ class Layer3StateSearcher:
                         push_duration,
                         push_body,
                         cmd,
+                        terrain,
                     )
                     losses[idx] = robustness
 
@@ -708,11 +724,13 @@ class Layer3StateSearcher:
         push_duration: float,
         push_body: str,
         cmd: Optional[np.ndarray],
+        terrain: Optional[dict],
     ) -> Tuple[float, EpisodeResult]:
         """评估状态扰动的鲁棒性"""
         pos_offset = perturbation[: self.num_joints]
         vel_offset = perturbation[self.num_joints :]
 
+        self._set_terrain(terrain)
         # 构建攻击
         attacks = self._build_attacks(
             base_push, base_friction, base_push_start, push_duration, push_body
@@ -886,6 +904,7 @@ def main() -> None:
         print(f"\n[{idx+1}/{len(top_entries)}] Refining Rank {rank}...")
         
         push, friction, names = _extract_params(entry)
+        terrain = entry.get("terrain", {"mode": "flat"})
         best = entry.get("best", {})
         push_start = best.get("push_start", 1.0)
         original_robustness = best.get("robustness", 0.0)
@@ -897,6 +916,7 @@ def main() -> None:
             base_push_start=push_start,
             push_duration=0.2,
             push_body="pelvis",
+            terrain=terrain,
         )
         
         improvement = original_robustness - refined_robustness
@@ -907,6 +927,7 @@ def main() -> None:
             "case_rank": rank,
             "param_names": names,
             "params": entry["params"],
+            "terrain": terrain,
             "original_robustness": original_robustness,
             "refined_robustness": refined_robustness,
             "improvement": improvement,

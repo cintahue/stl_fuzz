@@ -7,7 +7,11 @@ import mujoco
 import numpy as np
 
 from robostl.attacks.base import Attack, ObservationAttack, ObservationContext
-from robostl.attacks.terrain import align_heightfield_baseline
+from robostl.attacks.terrain import (
+    HeightfieldBump,
+    HeightfieldPit,
+    align_heightfield_baseline,
+)
 from robostl.core.config import DeployConfig
 from robostl.core.state import SimState
 from robostl.metrics.stability import (
@@ -126,6 +130,7 @@ class G1MujocoRunner:
         config: DeployConfig,
         policy: TorchScriptPolicy,
         cmd: Optional[np.ndarray] = None,
+        terrain: Optional[dict] = None,
         attacks: Optional[Iterable[Attack]] = None,
         obs_attacks: Optional[list[ObservationAttack]] = None,
     ) -> None:
@@ -137,6 +142,7 @@ class G1MujocoRunner:
             else self.config.cmd_init.copy()
         )
         self.attacks = list(attacks) if attacks is not None else []
+        self.terrain = terrain.copy() if terrain is not None else None
 
         self.model = mujoco.MjModel.from_xml_path(str(self.config.xml_path))
         self.data = mujoco.MjData(self.model)
@@ -155,13 +161,16 @@ class G1MujocoRunner:
     def reset(self) -> SimState:
         return self.reset_with_perturbation()
 
+    def set_terrain(self, terrain: Optional[dict]) -> None:
+        self.terrain = terrain.copy() if terrain is not None else None
+
     def reset_with_perturbation(
         self,
         joint_pos_offset: Optional[np.ndarray] = None,
         joint_vel_offset: Optional[np.ndarray] = None,
     ) -> SimState:
         mujoco.mj_resetData(self.model, self.data)
-        align_heightfield_baseline(self.model, self.data)
+        self._apply_terrain()
 
         num_joints = self.config.num_actions
         base_angles = self.config.default_angles.copy()
@@ -243,6 +252,36 @@ class G1MujocoRunner:
                 )
             self.data.qvel[6 : 6 + num_joints] += offset
         mujoco.mj_forward(self.model, self.data)
+
+    def _apply_terrain(self) -> None:
+        terrain = self.terrain or {"mode": "flat"}
+        mode = str(terrain.get("mode", "flat")).lower()
+        baseline = float(terrain.get("baseline", 0.5))
+
+        if mode == "pit":
+            HeightfieldPit(
+                center_xy=np.array(terrain.get("center", [1.0, 0.0]), dtype=np.float32),
+                radius=float(terrain.get("radius", 0.15)),
+                depth=float(terrain.get("depth", 0.03)),
+                baseline=baseline,
+            ).reset(self.model, self.data)
+            return
+
+        if mode == "bump":
+            HeightfieldBump(
+                center_xy=np.array(terrain.get("center", [1.0, 0.0]), dtype=np.float32),
+                radius=float(terrain.get("radius", 0.15)),
+                height=float(terrain.get("height", 0.03)),
+                baseline=baseline,
+            ).reset(self.model, self.data)
+            return
+
+        align_heightfield_baseline(
+            self.model,
+            self.data,
+            baseline=baseline,
+            flatten=True,
+        )
 
     def _snapshot_state(self) -> SimState:
         stability_margin = None

@@ -120,6 +120,8 @@ def main() -> None:
 
     cmd = np.array(entry.get("cmd", task.command), dtype=np.float32)
     runner.env.cmd = cmd.copy()
+    terrain = entry.get("terrain", {"mode": "flat"})
+    runner.env.set_terrain(terrain)
 
     push = np.array(entry.get("push", [0.0, 0.0, 0.0]), dtype=np.float32)
     friction = np.array(entry.get("friction", [1.0, 0.005, 0.0001]), dtype=np.float32)

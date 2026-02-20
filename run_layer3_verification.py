@@ -199,6 +199,10 @@ def _extract_cmd(entry: dict) -> np.ndarray:
     return np.array(entry.get("cmd", [1.0, 0.0, 0.0]), dtype=np.float32)
 
 
+def _extract_terrain(entry: dict) -> dict:
+    return entry.get("terrain", {"mode": "flat"})
+
+
 def _attack_direction(
     module: torch.jit.ScriptModule,
     obs: np.ndarray,
@@ -368,6 +372,7 @@ def _plot_analysis(
     plt.legend(loc="upper left")
 
     attack = result.get("attack", {})
+    terrain = result.get("terrain", {})
     perturb = result.get("perturbation", {})
     sensitivity = result.get("sensitivity") or "N/A"
     ranking = result.get("nonlinearity_ranking") or []
@@ -391,6 +396,7 @@ def _plot_analysis(
         f"push: {attack.get('push')}",
         f"friction: {attack.get('friction')}",
         f"cmd: {result.get('cmd')}",
+        f"terrain: {terrain}",
         f"push_start: {attack.get('push_start')}",
         f"keep_score: {result.get('keep_score')}",
         f"sensitivity: {sensitivity}",
@@ -453,6 +459,7 @@ def main() -> None:
 
         push, friction, push_start, push_duration, push_body = _extract_attack(entry)
         cmd = _extract_cmd(entry)
+        terrain = _extract_terrain(entry)
         joint_pos_offset = (
             np.array(entry.get("joint_pos_offset"), dtype=np.float32)
             if entry.get("joint_pos_offset") is not None
@@ -467,6 +474,7 @@ def main() -> None:
         attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
         runner.env.attacks = attacks
         runner.env.cmd = cmd.copy()
+        runner.env.set_terrain(terrain)
 
         t_star = max(0.0, float(push_start) + args.observe_offset)
         obs = _run_to_time_with_perturbation(
@@ -502,6 +510,7 @@ def main() -> None:
                 "phase": entry.get("phase"),
             },
             "cmd": cmd.tolist(),
+            "terrain": terrain,
             "perturbation": {
                 "joint_pos_offset": joint_pos_offset.tolist()
                 if joint_pos_offset is not None
