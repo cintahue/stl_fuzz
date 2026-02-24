@@ -1,4 +1,9 @@
 from __future__ import annotations
+"""STL 规约配置定义。
+
+该文件只负责“阈值与开关”的数据组织，不参与具体评估逻辑。
+运行时通常由 YAML 的 `stl` 字段加载，并在 `CompositeWalkingSpec` 中生效。
+"""
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -6,6 +11,15 @@ from typing import Any, Dict, Optional
 
 @dataclass
 class SpecConfig:
+    """扩展 STL 规约配置。
+
+    字段分组：
+    - Safety: `h_min`, `max_tilt_deg`, `max_torque`
+    - Stability: `zmp_margin` / `stability_margin`, `max_angular_velocity`
+    - Performance: `max_velocity_error`, `min_foot_clearance`, `max_action_delta`
+    - 开关/时间窗: `enable_*`, `use_zmp`, `evaluation_start_time`,
+      `performance_start_time`
+    """
     h_min: float = 0.25
     max_tilt_deg: float = 45.0
     max_torque: float = 50.0
@@ -25,6 +39,12 @@ class SpecConfig:
 
     @classmethod
     def from_dict(cls, raw: Optional[Dict[str, Any]]) -> "SpecConfig":
+        """从字典安全构建配置对象。
+
+        设计点：
+        - 当 `raw` 为空时返回默认配置；
+        - 逐项做类型转换，避免 YAML/JSON 解析后类型不一致带来的隐性错误。
+        """
         if not raw:
             return cls()
         data = dict(raw)
@@ -59,6 +79,7 @@ class SpecConfig:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """序列化为可写入 JSON/YAML 的普通字典。"""
         return {
             "h_min": self.h_min,
             "max_tilt_deg": self.max_tilt_deg,

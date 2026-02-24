@@ -92,6 +92,7 @@ class Layer3Result:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析 Layer 3 搜索参数。"""
     parser = argparse.ArgumentParser(
         description="Layer 3: CROWN-guided state space refinement search."
     )
@@ -208,6 +209,7 @@ def parse_args() -> argparse.Namespace:
 def _snapshot_memory(
     module: torch.jit.ScriptModule,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """保存 LSTM policy 的隐藏状态，确保多次前向评估可复现。"""
     if hasattr(module, "hidden_state") and hasattr(module, "cell_state"):
         hidden = module.hidden_state.detach().clone()
         cell = module.cell_state.detach().clone()
@@ -219,6 +221,7 @@ def _restore_memory(
     module: torch.jit.ScriptModule,
     snapshot: Optional[Tuple[torch.Tensor, torch.Tensor]],
 ) -> None:
+    """恢复 LSTM 隐藏状态快照。"""
     if snapshot is None:
         return
     hidden, cell = snapshot
@@ -229,6 +232,10 @@ def _restore_memory(
 
 
 def _evaluate_candidate_worker(payload: dict) -> tuple[float, EpisodeResult]:
+    """多进程候选评估函数。
+
+    每个进程独立构建仿真环境，避免 MuJoCo 上下文跨进程序列化问题。
+    """
     config = payload["config"]
     policy = TorchScriptPolicy(config.policy_path)
     task = WalkingTask.from_config(config)
@@ -282,6 +289,7 @@ def _safe_forward_np(
     obs: np.ndarray,
     snapshot: Optional[Tuple[torch.Tensor, torch.Tensor]],
 ) -> np.ndarray:
+    """安全前向：在需要时恢复并回滚循环策略记忆。"""
     x = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0)
     with torch.no_grad():
         _restore_memory(module, snapshot)
@@ -295,6 +303,7 @@ def _finite_difference_jac(
     obs: np.ndarray,
     epsilon: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """数值微分近似 Jacobian。"""
     snapshot = _snapshot_memory(module)
     step = max(1e-4, float(epsilon) * 0.1)
 
@@ -324,6 +333,7 @@ class CROWNSensitivityAnalyzer:
     """
     
     def __init__(self, policy: TorchScriptPolicy, epsilon: float = 0.02, use_crown: bool = True):
+        """初始化灵敏度分析器并检测 CROWN 可用性。"""
         self.policy = policy
         self.epsilon = epsilon
         self._crown_available = use_crown and self._check_crown_availability()
@@ -363,7 +373,7 @@ class CROWNSensitivityAnalyzer:
         from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
         
         try:
-            # 创建bounded module
+            # 创建 bounded module，并在 L∞(eps) 邻域上计算输出边界。
             bounded_model = BoundedModule(self.policy.module, obs_tensor)
             
             # 定义扰动
@@ -399,7 +409,7 @@ class CROWNSensitivityAnalyzer:
             return self._compute_linearized_sensitivity(obs_tensor)
     
     def _compute_linearized_sensitivity(self, obs_tensor: torch.Tensor) -> SensitivityResult:
-        """使用数值微分计算线性化灵敏度"""
+        """线性化回退路径：通过 Jacobian 估计输出扰动范围。"""
         obs = obs_tensor.squeeze(0).numpy()
         jac, nominal = _finite_difference_jac(self.policy.module, obs, self.epsilon)
         obs_dim = obs.shape[0]
@@ -527,6 +537,7 @@ class Layer3StateSearcher:
         return best_robustness, best_perturbation, [s for _, s in sensitivity_samples], best_episode
 
     def _set_terrain(self, terrain: Optional[dict]) -> None:
+        """同步设置当前搜索场景地形。"""
         self._terrain = terrain.copy() if terrain is not None else None
         self.runner.env.set_terrain(self._terrain)
     
@@ -604,11 +615,11 @@ class Layer3StateSearcher:
         
         使用灵敏度信息调整搜索分布。
         """
-        # 初始化CMA-ES
+        # 初始化 CMA-ES，在局部状态空间搜索最小鲁棒性扰动。
         mean = np.zeros(self.state_dim, dtype=np.float32)
         
-        # 根据灵敏度调整sigma
-        # 在敏感维度上使用更小的sigma (精细搜索)
+        # 根据灵敏度缩放边界：
+        # 敏感维更精细、非敏感维更粗放。
         sigma = self.config.local_sigma
         
         if self.config.joint_pos_scales is not None:
@@ -645,6 +656,7 @@ class Layer3StateSearcher:
             candidates = optimizer.ask()
             losses = np.zeros(len(candidates), dtype=np.float32)
 
+            # 并行模式：整代候选交给多进程评估，提高吞吐。
             if self.config.parallel_workers and self.config.parallel_workers > 1:
                 payloads = []
                 for perturbation in candidates:
@@ -675,6 +687,7 @@ class Layer3StateSearcher:
                             best_perturbation = candidates[idx].copy()
                             best_episode = episode
                 except Exception as exc:
+                    # 任一并行失败时降级串行，保证流程不中断。
                     print(f"[Layer3] Parallel eval failed, fallback to serial: {exc}")
                     for idx, perturbation in enumerate(candidates):
                         robustness, episode = self._evaluate_perturbation(
@@ -755,6 +768,7 @@ class Layer3StateSearcher:
         vel_scales: np.ndarray,
         sensitivity: SensitivityResult,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """将 obs 维敏感性映射到关节 pos/vel 维度缩放。"""
         pos_start = 9
         pos_end = pos_start + self.num_joints
         vel_start = pos_end
@@ -824,6 +838,11 @@ def _extract_params(entry: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndar
 
 
 def main() -> None:
+    """Layer 3 主流程。
+
+    读取 Layer 2 结果后，按最差候选逐个进行状态空间精细搜索，
+    输出每个案例的改进幅度与灵敏度摘要。
+    """
     args = parse_args()
     
     # 加载Layer 2结果
@@ -897,7 +916,7 @@ def main() -> None:
     )
     searcher = Layer3StateSearcher(runner, analyzer, search_config)
     
-    # 对每个Top候选进行精细搜索
+    # 对每个 Top 候选执行一次完整 Layer 3 精搜。
     results = []
     for idx, entry in enumerate(top_entries):
         rank = entry.get("rank", idx + 1)

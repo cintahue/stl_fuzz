@@ -93,6 +93,18 @@ surrogate:
   # Maximum buffer size (entries)
   buffer_max_size: 10000
 
+# ── Deviation STL (shadow simulation mode) ───────────────────────────────────
+deviation_stl:
+  # Deviation thresholds (cmd-independent)
+  max_delta_height: 0.08          # height deviation > 8 cm → anomalous
+  max_delta_tilt: 8.0             # tilt deviation > 8° → anomalous
+  max_delta_angular_velocity: 1.0 # angular velocity deviation upper bound (rad/s)
+  max_delta_velocity_error: 0.3   # velocity error deviation upper bound (m/s)
+  # Absolute hard constraints (retained from original STL)
+  absolute_max_tilt: 70.0         # fall threshold regardless of deviation
+  absolute_min_height: 0.25       # fall threshold regardless of deviation
+  evaluation_start_time: 1.0      # skip initialization transient
+
 # ── LLM integration (v2) ─────────────────────────────────────────────────────
 llm:
   # Set base_url to enable LLM features; leave empty to disable
@@ -107,3 +119,8 @@ llm:
   temperature_analysis: 0.3
   max_tokens: 2000
   timeout: 30.0
+  # Strategy generation settings
+  strategy_update_interval: 25    # update mutation strategy every N iterations
+  strategy_valid_iters: 25        # default strategy validity window
+  random_exploration_ratio: 0.25  # fraction of iterations using pure random (not LLM-guided)
+  strategy_failure_min: 5         # min failure cases needed to trigger strategy generation

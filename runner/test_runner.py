@@ -11,6 +11,7 @@ import numpy as np
 from robostl.core.config import DeployConfig
 from robostl.metrics.basic_walking import WalkingMetrics
 from robostl.specs.spec_config import SpecConfig
+from robostl.specs.stl_evaluator import STLTrace
 from robostl.specs.walking_specs import CompositeWalkingSpec
 from robostl.sim.g1_env import G1MujocoRunner
 from robostl.policies.torchscript import TorchScriptPolicy
@@ -301,3 +302,189 @@ class WalkingTestRunner:
             metrics=metrics,
             stl=stl_result.to_dict(),
         )
+
+    # ------------------------------------------------------------------
+    # Shadow-simulation methods (deviation-based STL evaluation)
+    # ------------------------------------------------------------------
+
+    def run_shadow_episode(
+        self,
+        friction=None,
+        terrain=None,
+    ):
+        """零扰动影子仿真：同 cmd/terrain/friction，无外力和关节扰动。
+
+        返回完整的 STLTrace 供后续偏差评估使用。
+        本方法使用独立的 WalkingMetrics 实例，不影响 self.metrics。
+        """
+        from robostl.attacks.terrain import FloorFrictionModifier
+
+        if terrain is not None:
+            self.env.set_terrain(terrain)
+
+        saved_attacks = self.env.attacks
+        shadow_attacks = []
+        if friction is not None:
+            shadow_attacks.append(FloorFrictionModifier(friction=friction))
+        self.env.attacks = shadow_attacks
+
+        try:
+            max_steps = int(self.config.simulation_duration / self.config.simulation_dt)
+            state = self.env.reset()
+            shadow_metrics = WalkingMetrics()
+            shadow_metrics.reset(state)
+            prev_action = self.env.action.copy()
+
+            for _ in range(max_steps):
+                state = self.env.step()
+                shadow_metrics.update(
+                    state,
+                    self.env.model,
+                    self.env.data,
+                    self.env.data.ctrl,
+                    self.env.cmd,
+                    prev_action,
+                    self.env._ground_geom_ids,
+                )
+                prev_action = state.action.copy()
+                # 不 stop_on_fall：影子仿真需要完整轨迹以对齐攻击仿真
+
+            return shadow_metrics.build_trace()
+        finally:
+            self.env.attacks = saved_attacks
+
+    def run_episode_fast_shadow(
+        self,
+        push=None,
+        friction=None,
+        push_start=None,
+        push_duration=0.2,
+        push_body="pelvis",
+        joint_pos_offset=None,
+        joint_vel_offset=None,
+        terrain=None,
+        shadow_trace=None,
+        deviation_config=None,
+    ):
+        """影子模式快速评估：返回偏差 STL 鲁棒性标量。
+
+        若提供 shadow_trace（同一 L1 参数的缓存），则跳过影子仿真以节省开销。
+        """
+        from robostl.attacks.force import ForcePerturbation
+        from robostl.attacks.terrain import FloorFrictionModifier
+        from robostl.specs.deviation_config import DeviationConfig
+        from robostl.specs.deviation_spec import DeviationWalkingSpec
+
+        if terrain is not None:
+            self.env.set_terrain(terrain)
+
+        if shadow_trace is None:
+            shadow_trace = self.run_shadow_episode(friction=friction, terrain=terrain)
+
+        attacks = []
+        if friction is not None:
+            attacks.append(FloorFrictionModifier(friction=friction))
+        if push is not None and push_start is not None:
+            attacks.append(
+                ForcePerturbation(
+                    body_name=push_body,
+                    force=push,
+                    start_time=push_start,
+                    duration=push_duration,
+                )
+            )
+        self.env.attacks = attacks
+
+        saved_render = self.render
+        self.render = False
+        try:
+            has_pert = joint_pos_offset is not None or joint_vel_offset is not None
+            perturb_time = push_start if push_start is not None else 0.0
+            if has_pert:
+                self.run_episode_with_midpoint_perturbation(
+                    perturbation_time=perturb_time,
+                    joint_pos_offset=joint_pos_offset,
+                    joint_vel_offset=joint_vel_offset,
+                )
+            else:
+                self.run_episode()
+        finally:
+            self.render = saved_render
+
+        attack_trace = self.metrics.build_trace()
+        dev_config = deviation_config if deviation_config is not None else DeviationConfig()
+        dev_result = DeviationWalkingSpec(dev_config).evaluate(shadow_trace, attack_trace)
+        return float(dev_result.robustness)
+
+    def run_episode_with_shadow(
+        self,
+        push=None,
+        friction=None,
+        push_start=None,
+        push_duration=0.2,
+        push_body="pelvis",
+        joint_pos_offset=None,
+        joint_vel_offset=None,
+        terrain=None,
+        shadow_trace=None,
+        deviation_config=None,
+    ):
+        """影子模式完整评估：返回基于偏差 STL 的 EpisodeResult。
+
+        stl_robustness 来自偏差评估而非绝对阈值评估。
+        """
+        from robostl.attacks.force import ForcePerturbation
+        from robostl.attacks.terrain import FloorFrictionModifier
+        from robostl.specs.deviation_config import DeviationConfig
+        from robostl.specs.deviation_spec import DeviationWalkingSpec
+
+        if terrain is not None:
+            self.env.set_terrain(terrain)
+
+        if shadow_trace is None:
+            shadow_trace = self.run_shadow_episode(friction=friction, terrain=terrain)
+
+        attacks = []
+        if friction is not None:
+            attacks.append(FloorFrictionModifier(friction=friction))
+        if push is not None and push_start is not None:
+            attacks.append(
+                ForcePerturbation(
+                    body_name=push_body,
+                    force=push,
+                    start_time=push_start,
+                    duration=push_duration,
+                )
+            )
+        self.env.attacks = attacks
+
+        saved_render = self.render
+        self.render = False
+        try:
+            has_pert = joint_pos_offset is not None or joint_vel_offset is not None
+            perturb_time = push_start if push_start is not None else 0.0
+            if has_pert:
+                result = self.run_episode_with_midpoint_perturbation(
+                    perturbation_time=perturb_time,
+                    joint_pos_offset=joint_pos_offset,
+                    joint_vel_offset=joint_vel_offset,
+                )
+            else:
+                result = self.run_episode()
+        finally:
+            self.render = saved_render
+
+        attack_trace = self.metrics.build_trace()
+        dev_config = deviation_config if deviation_config is not None else DeviationConfig()
+        dev_result = DeviationWalkingSpec(dev_config).evaluate(shadow_trace, attack_trace)
+
+        metrics = dict(result.metrics)
+        metrics["stl_robustness"] = dev_result.robustness
+        metrics["stl_safety_robustness"] = dev_result.safety.robustness
+        metrics["stl_stability_robustness"] = dev_result.stability.robustness
+        metrics["stl_performance_robustness"] = None
+        metrics["stl_first_violation_time"] = dev_result.diagnostics.first_violation_time
+        metrics["stl_most_violated_predicate"] = dev_result.diagnostics.most_violated_predicate
+        metrics["stl_details"] = dev_result.to_dict()
+
+        return EpisodeResult(metrics=metrics, stl=dev_result.to_dict())

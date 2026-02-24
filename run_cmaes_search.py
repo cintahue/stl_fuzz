@@ -1,4 +1,11 @@
 from __future__ import annotations
+"""Layer 1: 使用 CMA-ES 搜索宏观扰动参数。
+
+职责：
+1) 在 push / friction 参数空间中最小化 `stl_robustness`；
+2) 导出最优解 `layer1_result.json`；
+3) 导出兼顾多样性的 Top-K 候选 `layer1_top_k.json`，供 Layer 2 使用。
+"""
 
 if __package__ is None:
     import sys
@@ -25,6 +32,7 @@ from robostl.tasks.walking import WalkingTask
 
 @dataclass
 class SearchSpace:
+    """CMA-ES 搜索空间定义。"""
     names: list[str]
     mean: np.ndarray
     low: np.ndarray
@@ -33,6 +41,7 @@ class SearchSpace:
 
 @dataclass
 class ResultEntry:
+    """单次候选评估结果。"""
     robustness: float
     params: np.ndarray
     metrics: dict
@@ -46,6 +55,7 @@ def _parse_vec3(value: str) -> np.ndarray:
 
 
 def _build_search_space(args: argparse.Namespace) -> SearchSpace:
+    """根据开关拼接搜索维度，并构造上下界与初始均值。"""
     names: list[str] = []
     mean: list[float] = []
     low: list[float] = []
@@ -88,6 +98,7 @@ def _build_attacks(
     use_push: bool,
     use_friction: bool,
 ) -> list:
+    """将参数向量解码为运行期攻击对象。"""
     attacks = []
     cursor = 0
 
@@ -117,6 +128,7 @@ def _build_attacks(
 
 
 def parse_args() -> argparse.Namespace:
+    """解析 Layer 1 脚本参数。"""
     parser = argparse.ArgumentParser(description="CMA-ES search for STL robustness.")
     parser.add_argument(
         "--config",
@@ -206,6 +218,7 @@ def objective_function(
     runner: WalkingTestRunner,
     args: argparse.Namespace,
 ) -> tuple[float, dict]:
+    """目标函数：执行一轮仿真并返回 STL 鲁棒性作为 loss。"""
     attacks = _build_attacks(
         params=params,
         push_start=args.push_start,
@@ -227,6 +240,7 @@ def select_top_k_diverse(
     diversity_threshold: float,
     diversity_weights: np.ndarray,
 ) -> list[ResultEntry]:
+    """从全部候选里筛选“低鲁棒性 + 参数多样性”的 Top-K。"""
     if top_k <= 0 or not entries:
         return []
 
@@ -257,6 +271,7 @@ def _worker_objective(
     config_path: str,
     policy_path: Optional[str],
 ) -> tuple[float, dict]:
+    """并行 worker：每个进程独立构建 runner 并评估一个候选。"""
     config = DeployConfig.from_yaml(Path(config_path))
     if policy_path is not None:
         config = DeployConfig(
@@ -284,6 +299,7 @@ def _worker_objective(
 
 
 def _parse_weights(value: Optional[str], size: int) -> Optional[np.ndarray]:
+    """解析多样性权重字符串。"""
     if value is None:
         return None
     parts = [p.strip() for p in value.split(",") if p.strip()]
@@ -293,6 +309,10 @@ def _parse_weights(value: Optional[str], size: int) -> Optional[np.ndarray]:
 
 
 def _build_diversity_weights(args: argparse.Namespace, space: SearchSpace) -> np.ndarray:
+    """构建多样性距离权重。
+
+    默认策略：按各维跨度取倒数，做量纲归一化。
+    """
     provided = _parse_weights(args.diversity_weights, space.mean.size)
     if provided is not None:
         return provided
@@ -301,6 +321,13 @@ def _build_diversity_weights(args: argparse.Namespace, space: SearchSpace) -> np
 
 
 def main() -> None:
+    """Layer 1 主流程。
+
+    流程：
+    1) 初始化搜索空间与 runner；
+    2) 迭代执行 CMA-ES ask/tell；
+    3) 保存 best 与 Top-K（含多样性过滤）结果。
+    """
     args = parse_args()
     space = _build_search_space(args)
     diversity_weights = _build_diversity_weights(args, space)
@@ -342,6 +369,7 @@ def main() -> None:
     hall_of_fame: list[ResultEntry] = []
     all_results: list[ResultEntry] = []
 
+    # 多进程与 MuJoCo viewer 不兼容，开启并行时强制关闭渲染。
     if args.parallel and args.render:
         print("[Info] Parallel mode disables rendering to avoid multi-process viewer issues.")
         args.render = False
@@ -378,6 +406,7 @@ def main() -> None:
                         best_metrics = metrics
                     all_results.append(ResultEntry(loss, params.copy(), metrics))
 
+                # CMA-ES: 用整代损失更新分布参数（均值/协方差/sigma）。
                 state = optimizer.tell(losses)
                 mean_loss = float(np.mean(losses))
                 print(
@@ -404,6 +433,7 @@ def main() -> None:
                     best_metrics = metrics
                 all_results.append(ResultEntry(loss, params.copy(), metrics))
 
+            # 串行模式同样走 ask -> evaluate -> tell。
             state = optimizer.tell(losses)
             mean_loss = float(np.mean(losses))
             print(
@@ -438,6 +468,7 @@ def main() -> None:
     output.write_text(json.dumps(result_data, indent=2), encoding="utf-8")
     print(f"Search result saved to {output}")
 
+    # 从全量候选中构建可传递到 Layer 2 的“多样化危险场景集合”。
     hall_of_fame = select_top_k_diverse(
         all_results,
         args.top_k,

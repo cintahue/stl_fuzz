@@ -30,6 +30,8 @@ class DeployConfig:
     cmd_init: np.ndarray
     ground_geom_names: list[str]
     stl_config: dict = field(default_factory=dict)
+    deviation_stl_config: dict = field(default_factory=dict)
+    llm_config: dict = field(default_factory=dict)
 
     @staticmethod
     def default_config_path() -> Path:
@@ -70,4 +72,6 @@ class DeployConfig:
             cmd_init=np.array(raw["cmd_init"], dtype=np.float32),
             ground_geom_names=list(raw.get("ground_geom_names", ["terrain", "floor"])),
             stl_config=dict(raw.get("stl", {})),
+            deviation_stl_config=dict(raw.get("deviation_stl", {})),
+            llm_config=dict(raw.get("llm", {})),
         )

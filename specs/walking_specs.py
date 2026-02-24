@@ -1,4 +1,11 @@
 from __future__ import annotations
+"""组合式 Walking STL 规约实现。
+
+核心职责：
+1) 按配置构造 safety/stability/performance 三层谓词；
+2) 在指定时间窗内计算每个谓词与每层的鲁棒性；
+3) 聚合全局鲁棒性并生成诊断信息。
+"""
 
 from typing import Dict, List, Optional
 
@@ -11,6 +18,7 @@ from robostl.specs.stl_evaluator import STLTrace
 
 
 def _safe_min(values: np.ndarray) -> float:
+    """有限值最小值（忽略 NaN/Inf）。"""
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return float("nan")
@@ -18,6 +26,7 @@ def _safe_min(values: np.ndarray) -> float:
 
 
 def _safe_max(values: np.ndarray) -> float:
+    """有限值最大值（忽略 NaN/Inf）。"""
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return float("nan")
@@ -25,6 +34,10 @@ def _safe_max(values: np.ndarray) -> float:
 
 
 def _filter_trace(trace: STLTrace, mask: Optional[np.ndarray]) -> STLTrace:
+    """按时间掩码过滤 trace。
+
+    若掩码为空或全 False，返回空轨迹（保持字段完整）。
+    """
     if mask is None:
         return trace
     if not np.any(mask):
@@ -39,10 +52,12 @@ def _filter_trace(trace: STLTrace, mask: Optional[np.ndarray]) -> STLTrace:
 
 
 class CompositeWalkingSpec:
+    """扩展 walking 规约评估器。"""
     def __init__(self, config: SpecConfig) -> None:
         self.config = config
 
     def _build_predicates(self) -> List[PredicateSpec]:
+        """根据配置构造分层谓词集合。"""
         safety = [
             greater_than("height", "height", self.config.h_min, "safety"),
             less_than("tilt", "tilt", self.config.max_tilt_deg, "safety"),
@@ -93,13 +108,16 @@ class CompositeWalkingSpec:
         return safety + stability + performance
 
     def evaluate(self, trace: STLTrace) -> ExtendedSTLResult:
+        """执行分层规约评估并输出扩展结果。"""
         predicates = self._build_predicates()
 
         time = trace.time
+        # 全局评估窗口：跳过初始化阶段（例如落地瞬态）。
         global_mask = time >= float(self.config.evaluation_start_time)
         global_trace = _filter_trace(trace, global_mask)
         perf_mask = None
         if self.config.enable_performance:
+            # 性能层可在全局窗口基础上再延迟启动。
             perf_start = float(self.config.evaluation_start_time) + float(
                 self.config.performance_start_time
             )
@@ -119,6 +137,7 @@ class CompositeWalkingSpec:
         }
 
         for pred in predicates:
+            # 按层级开关过滤谓词。
             if pred.level == "performance" and not self.config.enable_performance:
                 continue
             if pred.level == "stability" and not self.config.enable_stability:
@@ -131,6 +150,7 @@ class CompositeWalkingSpec:
             else:
                 trace_used = global_trace
 
+            # 逐时刻鲁棒性序列（后续用于 min 聚合和诊断轨迹）。
             series = pred.expr.robustness(trace_used)
             trajectory_times[pred.name] = trace_used.time
 
@@ -147,6 +167,7 @@ class CompositeWalkingSpec:
                 performance_details[pred.name] = detail
             layer_robustness[pred.level].append(robustness)
 
+        # 各层鲁棒性采用“层内 min”聚合（G 算子语义）。
         safety_robustness = _safe_min(np.array(layer_robustness["safety"], dtype=np.float32))
         stability_robustness = _safe_min(
             np.array(layer_robustness["stability"], dtype=np.float32)
@@ -181,6 +202,7 @@ class CompositeWalkingSpec:
                 details=performance_details,
             )
 
+        # 全局鲁棒性采用“已启用层的 min”。
         enabled_layers = []
         if self.config.enable_safety:
             enabled_layers.append(safety_robustness)
@@ -196,6 +218,10 @@ class CompositeWalkingSpec:
         worst_value = float("inf")
         violation_sequence: list[tuple[float, str]] = []
 
+        # 诊断构建：
+        # - first_violation_time: 最早违例时刻
+        # - most_violated_predicate: 最严重谓词
+        # - violation_sequence: 按时间排序的违例序列
         for name, series in trajectories.items():
             values = np.array(series, dtype=np.float32)
             if np.isfinite(values).any():

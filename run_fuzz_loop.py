@@ -1,4 +1,15 @@
 from __future__ import annotations
+"""RoboSTL-Fuzz 主循环（L1 -> L2 -> L3）。
+
+该脚本负责把三层搜索串成一个持续运行流程：
+1) L1：采样/变异宏观参数（push、friction、cmd、terrain）
+2) L2：在步态相位上搜索更危险的攻击时刻
+3) L3：在攻击时刻对关节状态做精细搜索（由 run_layer3_search 提供）
+
+核心产物：
+- `fuzz_outputs/seeds/`: 种子池（用于后续利用模式）
+- `fuzz_outputs/failures/`: 触发失效的完整复现案例
+"""
 
 if __package__ is None:
     import sys
@@ -33,6 +44,13 @@ from robostl.tasks.walking import WalkingTask
 
 @dataclass
 class SeedEntry:
+    """种子池条目。
+
+    说明：
+    - `push/friction/cmd/terrain/phase` 组成 L1/L2 的宏观场景定义
+    - `joint_pos_offset/joint_vel_offset` 是 L3 找到的微扰动
+    - `keep_score` 用于池内排序与淘汰
+    """
     push: np.ndarray
     friction: np.ndarray
     cmd: np.ndarray
@@ -46,6 +64,7 @@ class SeedEntry:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析 fuzz 主循环参数。"""
     parser = argparse.ArgumentParser(
         description="Integrated L1->L2->L3 fuzzing loop."
     )
@@ -241,6 +260,7 @@ def _parse_rect(value: str) -> tuple[float, float, float, float]:
 
 
 def _sample_terrain(args: argparse.Namespace) -> dict:
+    """随机采样地形参数（flat/pit/bump）。"""
     modes = [m.strip() for m in args.terrain_modes.split(",") if m.strip()]
     if not modes:
         return {"mode": "flat", "baseline": float(args.terrain_baseline)}
@@ -280,6 +300,14 @@ def _mutate_terrain(
     mode: str,
     args: argparse.Namespace,
 ) -> dict:
+    """地形变异算子。
+
+    支持四种模式：
+    - keep: 保持原地形
+    - jump: 全新随机重采样
+    - crossover: 与另一种子交换/混合参数
+    - gaussian: 在当前地形附近做局部扰动
+    """
     modes = [m.strip() for m in args.terrain_modes.split(",") if m.strip()]
     if not modes:
         return {"mode": "flat", "baseline": float(args.terrain_baseline)}
@@ -395,6 +423,11 @@ def _build_attacks(
     push_duration: float,
     push_body: str,
 ) -> list:
+    """构建运行期攻击列表（不含地形）。
+
+    约定：地形由 `env.set_terrain()` 在 reset 前设置；
+    这里仅保留摩擦扰动与推力扰动。
+    """
     attacks = []
     if friction is not None:
         attacks.append(FloorFrictionModifier(friction=friction))
@@ -411,6 +444,7 @@ def _build_attacks(
 
 
 def _build_foot_geom_map(model: mujoco.MjModel) -> dict[int, str]:
+    """根据 geom/body 名称启发式识别左右脚几何体。"""
     foot_keywords = ("foot", "ankle", "toe", "heel", "sole")
     mapping: dict[int, str] = {}
     for geom_id in range(model.ngeom):
@@ -440,6 +474,13 @@ def _probe_phase(
     min_period: float,
     default_period: float,
 ) -> tuple[float, float]:
+    """估计步态周期与周期起点。
+
+    方法：统计脚-地接触事件时间，做去抖后取中位步长。
+    返回：
+    - period: 估计周期（异常时回退 default_period）
+    - cycle_start: 第一侧触地时刻
+    """
     runner.env.set_terrain(terrain)
     runner.env.attacks = _build_attacks(
         push=None,
@@ -515,6 +556,7 @@ def _phase_to_time(
     cycle_start: float,
     settle_time: float,
 ) -> float:
+    """将相位 [0,1] 映射到绝对攻击时间。"""
     cycle = cycle_start
     if settle_time > cycle and period > 0:
         cycle += math.ceil((settle_time - cycle) / period) * period
@@ -533,6 +575,7 @@ def _evaluate_phases(
     push_body: str,
     terrain: Optional[dict],
 ) -> tuple[float, float, bool]:
+    """扫描候选相位并选择最坏鲁棒性结果。"""
     runner.env.set_terrain(terrain)
     best_phase = phases[0]
     best_robustness = float("inf")
@@ -551,6 +594,7 @@ def _evaluate_phases(
 
 
 def _weighted_distance(vec: np.ndarray, pool: list[SeedEntry], weights: np.ndarray) -> float:
+    """计算当前候选到种子池最近样本的加权欧式距离。"""
     if not pool:
         return 0.0
     distances = []
@@ -573,12 +617,18 @@ def _compute_keep_score(
     dist_min: float,
     dist_max: float,
 ) -> float:
+    """计算种子保留分。
+
+    保留分 = (1 - 归一化鲁棒性) + 0.5 * 归一化多样性距离
+    分数越高越优先保留。
+    """
     rob_norm = _normalize(robustness, rob_min, rob_max)
     dist_norm = _normalize(distance, dist_min, dist_max)
     return (1.0 - rob_norm) + 0.5 * dist_norm
 
 
 def _select_seed(pool: list[SeedEntry]) -> SeedEntry:
+    """从种子池选父代：50%按 keep_score 加权采样，50%随机。"""
     if not pool:
         raise ValueError("Seed pool is empty.")
     if random.random() < 0.5:
@@ -603,7 +653,13 @@ def _mutate_l1(
     cmd_min: np.ndarray,
     cmd_max: np.ndarray,
     args: argparse.Namespace,
+    strategy=None,  # Optional[MutationStrategy] — import avoided to keep v1 self-contained
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """L1 变异：同时处理 push/friction/cmd/terrain。
+
+    当 strategy 不为 None 时，gaussian 模式的 sigma 和均值受 LLM 策略调控；
+    其他模式（jump/crossover/keep）不受影响，保持原有随机性。
+    """
     if random.random() < 0.1:
         mode = "keep"
     else:
@@ -612,9 +668,18 @@ def _mutate_l1(
         sigma_push = (push_max - push_min) * 0.1
         sigma_fric = (fric_max - fric_min) * 0.1
         sigma_cmd = (cmd_max - cmd_min) * 0.1
+        # 应用 LLM 策略：缩放步长 + 均值偏移
+        if strategy is not None:
+            sigma_push = sigma_push * np.asarray(strategy.push_scale, dtype=np.float32)
+            sigma_fric = sigma_fric * np.asarray(strategy.friction_scale, dtype=np.float32)
+            sigma_cmd = sigma_cmd * np.asarray(strategy.cmd_scale, dtype=np.float32)
         push = base.push + np.random.normal(0.0, sigma_push)
         friction = base.friction + np.random.normal(0.0, sigma_fric)
         cmd = base.cmd + np.random.normal(0.0, sigma_cmd)
+        if strategy is not None:
+            push = push + np.asarray(strategy.push_bias, dtype=np.float32)
+            friction = friction + np.asarray(strategy.friction_bias, dtype=np.float32)
+            cmd = cmd + np.asarray(strategy.cmd_bias, dtype=np.float32)
     elif mode == "jump":
         push = base.push.copy()
         friction = base.friction.copy()
@@ -644,8 +709,112 @@ def _mutate_l1(
     push = np.clip(push, push_min, push_max)
     friction = np.clip(friction, fric_min, fric_max)
     cmd = np.clip(cmd, cmd_min, cmd_max)
-    terrain = _mutate_terrain(base.terrain, pool, mode, args)
+    # 地形变异：若有策略权重则使用加权采样；否则走均匀随机
+    if strategy is not None and strategy.terrain_mode_weights:
+        terrain = _mutate_terrain_weighted(
+            base.terrain, pool, mode, args, strategy.terrain_mode_weights
+        )
+    else:
+        terrain = _mutate_terrain(base.terrain, pool, mode, args)
     return push, friction, cmd, terrain
+
+
+def _mutate_terrain_weighted(
+    base: Optional[dict],
+    pool: list[SeedEntry],
+    mode: str,
+    args: argparse.Namespace,
+    mode_weights: dict,
+) -> dict:
+    """带策略权重的地形变异。
+
+    在 jump/crossover/gaussian(flat→随机) 等需要随机选择地形模式时，
+    按 mode_weights 进行加权采样而非均匀随机。
+    """
+    modes = [m.strip() for m in args.terrain_modes.split(",") if m.strip()]
+    if not modes:
+        return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+
+    # 构建加权采样序列
+    weights = [float(mode_weights.get(m, 1.0 / len(modes))) for m in modes]
+    total = sum(weights)
+    weights = [w / total for w in weights]
+
+    terrain = (base.copy() if base else {"mode": "flat"}).copy()
+    terrain.setdefault("baseline", float(args.terrain_baseline))
+    terrain_mode = str(terrain.get("mode", "flat"))
+
+    x_min, x_max, y_min, y_max = _parse_rect(args.terrain_center_range)
+    r_min, r_max = _parse_range(args.terrain_radius_range)
+    d_min, d_max = _parse_range(args.terrain_depth_range)
+    h_min, h_max = _parse_range(args.terrain_height_range)
+
+    def _clamp(val, vmin, vmax):
+        return float(max(vmin, min(vmax, val)))
+
+    def _sample_weighted() -> dict:
+        sel_mode = random.choices(modes, weights=weights, k=1)[0]
+        if sel_mode == "flat":
+            return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+        center = [random.uniform(x_min, x_max), random.uniform(y_min, y_max)]
+        radius = random.uniform(r_min, r_max)
+        if sel_mode == "pit":
+            return {
+                "mode": "pit",
+                "center": center,
+                "radius": radius,
+                "depth": random.uniform(d_min, d_max),
+                "baseline": float(args.terrain_baseline),
+            }
+        return {
+            "mode": "bump",
+            "center": center,
+            "radius": radius,
+            "height": random.uniform(h_min, h_max),
+            "baseline": float(args.terrain_baseline),
+        }
+
+    if mode == "keep":
+        return terrain
+
+    if mode == "jump":
+        return _sample_weighted()
+
+    if mode == "crossover" and pool:
+        mate = random.choice(pool)
+        mate_terrain = mate.terrain.copy() if mate.terrain else {"mode": "flat"}
+        if str(mate_terrain.get("mode", "flat")) != terrain_mode:
+            return mate_terrain if random.random() < 0.5 else terrain
+        mode = "gaussian"  # fall through to gaussian for same-mode crossover
+
+    if mode == "gaussian":
+        if terrain_mode == "flat":
+            if len(modes) > 1 and random.random() < 0.3:
+                return _sample_weighted()
+            return {"mode": "flat", "baseline": float(args.terrain_baseline)}
+        center = terrain.get("center", [1.0, 0.0])
+        radius = float(terrain.get("radius", 0.15))
+        sigma_x = (x_max - x_min) * 0.1
+        sigma_y = (y_max - y_min) * 0.1
+        sigma_r = (r_max - r_min) * 0.1
+        terrain["center"] = [
+            _clamp(center[0] + random.gauss(0.0, sigma_x), x_min, x_max),
+            _clamp(center[1] + random.gauss(0.0, sigma_y), y_min, y_max),
+        ]
+        terrain["radius"] = _clamp(radius + random.gauss(0.0, sigma_r), r_min, r_max)
+        if terrain_mode == "pit":
+            depth = float(terrain.get("depth", 0.03))
+            terrain["depth"] = _clamp(
+                depth + random.gauss(0.0, (d_max - d_min) * 0.1), d_min, d_max
+            )
+        if terrain_mode == "bump":
+            height = float(terrain.get("height", 0.03))
+            terrain["height"] = _clamp(
+                height + random.gauss(0.0, (h_max - h_min) * 0.1), h_min, h_max
+            )
+        terrain["baseline"] = float(args.terrain_baseline)
+
+    return terrain
 
 
 def _mutate_phase(
@@ -655,6 +824,7 @@ def _mutate_phase(
     span: float,
     mate_phase: Optional[float] = None,
 ) -> list[float]:
+    """L2 相位变异：util/grid/crossover/random。"""
     if mode == "util":
         center = base_phase
         phases = [
@@ -697,6 +867,7 @@ def _min_distance(
 
 
 def _recompute_keep_scores(pool: list[SeedEntry], weights: np.ndarray) -> None:
+    """全量重算 keep_score，保证池内排序与淘汰一致。"""
     if not pool:
         return
     robustness_vals = [s.robustness for s in pool]
@@ -714,6 +885,7 @@ def _recompute_keep_scores(pool: list[SeedEntry], weights: np.ndarray) -> None:
 
 
 def _save_failure(failure_dir: Path, iteration: int, payload: dict) -> None:
+    """按案例目录保存失效样本（failure_xxxxx/case.json）。"""
     case_dir = failure_dir / f"failure_{iteration:05d}"
     case_dir.mkdir(parents=True, exist_ok=True)
     path = case_dir / "case.json"
@@ -721,6 +893,7 @@ def _save_failure(failure_dir: Path, iteration: int, payload: dict) -> None:
 
 
 def _load_seed_pool(seed_dir: Path) -> list[SeedEntry]:
+    """从磁盘加载历史种子池。"""
     seed_pool: list[SeedEntry] = []
     if not seed_dir.exists():
         return seed_pool
@@ -748,6 +921,7 @@ def _load_seed_pool(seed_dir: Path) -> list[SeedEntry]:
 
 
 def _save_seed_pool(seed_dir: Path, seed_pool: list[SeedEntry]) -> None:
+    """将当前种子池完整落盘（每个种子一个 json）。"""
     seed_dir.mkdir(parents=True, exist_ok=True)
     for path in seed_dir.glob("seed_*.json"):
         path.unlink()
@@ -773,6 +947,13 @@ def _save_seed_pool(seed_dir: Path, seed_pool: list[SeedEntry]) -> None:
 
 
 def main() -> None:
+    """主循环入口。
+
+    执行阶段：
+    1) 初始化配置、策略、runner、L3 搜索器
+    2) 每轮执行 L1/L2/L3
+    3) 更新种子池与失效库
+    """
     args = parse_args()
     if args.seed is not None:
         random.seed(args.seed)
@@ -839,12 +1020,15 @@ def main() -> None:
     )
     searcher = Layer3StateSearcher(runner_l2, analyzer, search_config)
 
+    # `iterations<=0` 表示无限循环，手动 Ctrl+C 终止；
+    # 否则按固定轮次运行。
     if args.iterations <= 0:
         iteration_iter = iter(int, 1)
     else:
         iteration_iter = range(args.iterations)
 
     for iteration in iteration_iter:
+        # 动态探索-利用比例：种子越多，利用比例越高（受 exploit_cap 上限限制）。
         exploit_ratio = min(args.exploit_cap, len(seed_pool) * 0.02)
         use_exploit = random.random() < exploit_ratio
         attempts = 0
@@ -889,6 +1073,7 @@ def main() -> None:
                 ]
 
             runner_l2.env.cmd = cmd.copy()
+            # 基于当前宏观场景探测步态周期，供 L2 相位映射使用。
             period, cycle_start = _probe_phase(
                 runner_l2,
                 friction=friction,
@@ -913,6 +1098,7 @@ def main() -> None:
             )
             if not best_fallen:
                 break
+            # 若宏观攻击已导致明显摔倒，按策略重采样，避免低价值样本进入后续层。
             if attempts >= args.l1_max_resample:
                 print(
                     f"[Warning] Iter {iteration+1}: L1 macro caused fall after {attempts} resamples; skipping."
@@ -925,6 +1111,7 @@ def main() -> None:
         push_start = _phase_to_time(best_phase, period, cycle_start, args.settle_time)
 
         runner_l2.env.cmd = cmd.copy()
+        # 进入 L3：在已选宏观参数和相位下搜索最坏的微扰动状态。
         refined_robustness, best_perturbation, sensitivity_history, best_episode = searcher.search(
             base_push=push,
             base_friction=friction,
@@ -978,6 +1165,7 @@ def main() -> None:
         )
 
         if len(seed_pool) < args.seed_pool_size or keep_score >= min(s.keep_score for s in seed_pool):
+            # 池满时按 keep_score 淘汰最弱种子，维持固定容量。
             seed_pool.append(new_seed)
             _recompute_keep_scores(seed_pool, weights)
             seed_pool.sort(key=lambda s: s.keep_score, reverse=True)

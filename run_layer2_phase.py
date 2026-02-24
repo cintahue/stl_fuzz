@@ -1,4 +1,9 @@
 from __future__ import annotations
+"""Layer 2: 相位搜索（在固定 L1 宏观参数下搜索最坏攻击时刻）。
+
+输入：Layer 1 的 Top-K 参数集合；
+输出：每个参数集合在不同相位下的鲁棒性曲线与最坏相位结果。
+"""
 
 if __package__ is None:
     import sys
@@ -27,6 +32,7 @@ from robostl.tasks.walking import WalkingTask
 
 @dataclass
 class PhaseProbeResult:
+    """步态周期探测结果。"""
     period_s: float
     raw_period_s: float
     cycle_start_s: float
@@ -35,6 +41,7 @@ class PhaseProbeResult:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析 Layer 2 参数。"""
     parser = argparse.ArgumentParser(description="Layer 2 phase search for STL robustness.")
     parser.add_argument(
         "--input",
@@ -106,6 +113,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _extract_params(entry: dict) -> tuple[Optional[np.ndarray], Optional[np.ndarray], list[str]]:
+    """从 Layer 1 条目中提取 push / friction。"""
     params = np.array(entry["params"], dtype=np.float32)
     names = entry.get("param_names", [])
     mapping = {name: float(value) for name, value in zip(names, params)}
@@ -134,6 +142,7 @@ def _build_attacks(
     push_duration: float,
     push_body: str,
 ) -> list:
+    """构建该相位下的攻击列表（摩擦 + 可选推力）。"""
     attacks = []
     if friction is not None:
         attacks.append(FloorFrictionModifier(friction=friction))
@@ -150,6 +159,7 @@ def _build_attacks(
 
 
 def _build_foot_geom_map(model: mujoco.MjModel) -> dict[int, str]:
+    """根据命名规则识别左右脚接触 geom。"""
     foot_keywords = ("foot", "ankle", "toe", "heel", "sole")
     mapping: dict[int, str] = {}
     for geom_id in range(model.ngeom):
@@ -178,6 +188,13 @@ def _probe_phase(
     min_period: float,
     default_period: float,
 ) -> PhaseProbeResult:
+    """通过脚-地接触事件估计步态周期。
+
+    特点：
+    - 使用触地上升沿记录接触时刻；
+    - 用 `min_step_duration` 去抖；
+    - 周期异常时回退到 `default_period`。
+    """
     runner_env = env.env
     runner_env.set_terrain(terrain)
     model = runner_env.model
@@ -259,6 +276,7 @@ def _evaluate_entry(
     config_path: str,
     policy_path: Optional[str],
 ) -> dict:
+    """评估单个 Layer 1 候选在全相位网格上的鲁棒性。"""
     args = argparse.Namespace(**args_dict)
 
     config = DeployConfig.from_yaml(Path(config_path))
@@ -307,6 +325,7 @@ def _evaluate_entry(
     phase_results = []
     best = {"phase": None, "robustness": float("inf"), "push_start": None}
 
+    # 将相位起点平移到 settle_time 之后的第一个完整周期，避免初始化阶段干扰。
     cycle_start = probe.cycle_start_s
     if args.settle_time > cycle_start and probe.period_s > 0:
         offset_cycles = math.ceil((args.settle_time - cycle_start) / probe.period_s)
@@ -365,9 +384,14 @@ def _evaluate_entry(
 
 
 def main() -> None:
+    """Layer 2 主流程。
+
+    支持串行/并行两种评估模式，最终输出按 rank 排序的结果 JSON。
+    """
     args = parse_args()
     top_k = json.loads(args.input.read_text(encoding="utf-8"))
 
+    # 并行进程下不使用 viewer，避免上下文冲突。
     if args.parallel and args.render:
         print("[Info] Parallel mode disables rendering to avoid viewer conflicts.")
         args.render = False

@@ -1,4 +1,11 @@
 from __future__ import annotations
+"""Layer 3 诊断脚本：对失效案例做局部可解释分析。
+
+本脚本不做搜索优化，主要用于“复盘与归因”：
+1) 将仿真推进到失效相关时刻 t*；
+2) 沿输入扰动方向做 exact-line 扫描；
+3) 产出 JSON 分析结果与可视化图。
+"""
 
 if __package__ is None:
     import sys
@@ -24,6 +31,7 @@ from robostl.tasks.walking import WalkingTask
 
 
 def parse_args() -> argparse.Namespace:
+    """解析诊断脚本参数。"""
     parser = argparse.ArgumentParser(
         description="Layer 3 verification: exact line scan over failure cases."
     )
@@ -97,6 +105,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _load_failure_cases(input_path: Path) -> list[tuple[str, dict, Path]]:
+    """读取单案例或批量 failure_* 目录。"""
     if input_path.is_dir():
         cases = []
         for case_dir in sorted(input_path.glob("failure_*")):
@@ -114,6 +123,7 @@ def _build_attacks(
     push_duration: float,
     push_body: str,
 ) -> list:
+    """构建复现实验攻击（摩擦 + 推力）。"""
     attacks = []
     if friction is not None:
         attacks.append(FloorFrictionModifier(friction=friction))
@@ -135,6 +145,7 @@ def _run_to_time_with_perturbation(
     joint_pos_offset: Optional[np.ndarray],
     joint_vel_offset: Optional[np.ndarray],
 ) -> np.ndarray:
+    """运行到目标时刻并施加状态扰动，返回该时刻观测。"""
     env = runner.env
     state = env.reset()
     dt = runner.config.simulation_dt
@@ -153,6 +164,7 @@ def _run_to_time_with_perturbation(
 def _snapshot_memory(
     module: torch.jit.ScriptModule,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """保存循环策略记忆状态。"""
     if hasattr(module, "hidden_state") and hasattr(module, "cell_state"):
         hidden = module.hidden_state.detach().clone()
         cell = module.cell_state.detach().clone()
@@ -164,6 +176,7 @@ def _restore_memory(
     module: torch.jit.ScriptModule,
     snapshot: Optional[Tuple[torch.Tensor, torch.Tensor]],
 ) -> None:
+    """恢复循环策略记忆状态。"""
     if snapshot is None:
         return
     hidden, cell = snapshot
@@ -178,6 +191,7 @@ def _safe_forward_np(
     obs: np.ndarray,
     snapshot: Optional[Tuple[torch.Tensor, torch.Tensor]],
 ) -> np.ndarray:
+    """安全前向推理（支持循环策略记忆回滚）。"""
     x = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0)
     with torch.no_grad():
         _restore_memory(module, snapshot)
@@ -187,6 +201,7 @@ def _safe_forward_np(
 
 
 def _extract_attack(entry: dict) -> tuple[np.ndarray, np.ndarray, float, float, str]:
+    """从案例中提取宏观攻击参数。"""
     push = np.array(entry.get("push", [0.0, 0.0, 0.0]), dtype=np.float32)
     friction = np.array(entry.get("friction", [1.0, 0.005, 0.0001]), dtype=np.float32)
     push_start = float(entry.get("push_start", 0.0))
@@ -196,10 +211,12 @@ def _extract_attack(entry: dict) -> tuple[np.ndarray, np.ndarray, float, float, 
 
 
 def _extract_cmd(entry: dict) -> np.ndarray:
+    """提取命令速度向量。"""
     return np.array(entry.get("cmd", [1.0, 0.0, 0.0]), dtype=np.float32)
 
 
 def _extract_terrain(entry: dict) -> dict:
+    """提取地形配置。"""
     return entry.get("terrain", {"mode": "flat"})
 
 
@@ -208,6 +225,10 @@ def _attack_direction(
     obs: np.ndarray,
     action_index: Optional[int],
 ) -> dict:
+    """估计输入扰动方向。
+
+    优先使用 autograd；若策略结构不支持则回退数值微分。
+    """
     snapshot = _snapshot_memory(module)
     has_memory = snapshot is not None
 
@@ -277,6 +298,7 @@ def _exact_line_scan(
     epsilon: float,
     samples: int,
 ) -> dict:
+    """沿给定方向在 [-epsilon, epsilon] 做精确线扫描。"""
     snapshot = _snapshot_memory(module)
     alphas = np.linspace(-epsilon, epsilon, samples, dtype=np.float32)
     actions = []
@@ -302,6 +324,7 @@ def _exact_line_scan(
 
 
 def _rank_nonlinearity_dimensions(result: dict) -> list[dict]:
+    """按斜率变化量对动作维度非线性程度排序。"""
     alphas = np.array(result["exactline"]["alphas"], dtype=np.float32)
     actions = np.array(result["exactline"]["actions"], dtype=np.float32)
     if actions.size == 0 or actions.ndim != 2:
@@ -329,6 +352,7 @@ def _plot_analysis(
     output_path: Path,
     dim: Optional[int],
 ) -> None:
+    """绘制单案例诊断图并叠加关键图注信息。"""
     alphas = np.array(result["exactline"]["alphas"], dtype=np.float32)
     actions = np.array(result["exactline"]["actions"], dtype=np.float32)
 
@@ -423,12 +447,14 @@ def _plot_analysis(
 
 
 def main() -> None:
+    """批量/单案例诊断主流程。"""
     args = parse_args()
     cases = _load_failure_cases(args.input)
     if not cases:
         raise SystemExit(f"No cases found under: {args.input}")
 
     results = []
+    # 逐案例加载、复现、分析并输出结果。
     for case_id, entry, case_dir in cases:
         config_path = args.config or Path(entry.get("config", DeployConfig.default_config_path()))
         config = DeployConfig.from_yaml(config_path)
@@ -528,12 +554,14 @@ def main() -> None:
         }
         results.append(result)
 
+        # 目录输入：每个案例目录各自产生 analysis.json + analysis.png。
         if args.input.is_dir():
             out_path = case_dir / args.output_name
             out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
             plot_path = case_dir / args.plot_name
             _plot_analysis(result, plot_path, args.plot_dim)
 
+    # 文件输入：汇总写出单个输出文件。
     if args.input.is_file():
         output = args.output or Path("layer3_results.json")
         output.write_text(json.dumps(results, indent=2), encoding="utf-8")

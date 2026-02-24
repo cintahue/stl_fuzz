@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Baseline calibration for STL thresholds."
     )
+    # baseline 标定输入配置：
+    # 1) 使用哪份部署配置/策略
+    # 2) 采集多少轮正常行走
+    # 3) 跳过初始化不稳定阶段的时长
+    # 4) 覆盖多种速度指令，避免阈值只适配单一工况
     parser.add_argument(
         "--config",
         type=Path,
@@ -67,6 +72,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _parse_commands(value: str) -> list[np.ndarray]:
+    # 将 "vx,vy,wz;vx,vy,wz;..." 解析成命令列表。
+    # 标定时会循环使用这些命令，使统计覆盖多种正常行为。
     commands = []
     for part in value.split(";"):
         part = part.strip()
@@ -82,6 +89,8 @@ def _parse_commands(value: str) -> list[np.ndarray]:
 
 
 def _collect_values(trace, signal: str, skip_initial_s: float) -> np.ndarray:
+    # 只统计 skip_initial_s 之后的数据：
+    # 机器人初始落体/落地阶段波动大，不应纳入正常基线。
     if signal not in trace.signals:
         return np.array([], dtype=np.float32)
     time = trace.time
@@ -98,6 +107,9 @@ def _percentile(values: np.ndarray, q: float) -> float:
 
 
 def _stats(values: np.ndarray) -> dict[str, Any]:
+    # 统一统计口径：
+    # min/max/mean/std + 分位数(P1/P5/P99/P99.9)
+    # 后续阈值推导会按信号类型选取不同统计量。
     if values.size == 0:
         return {}
     return {
@@ -113,42 +125,55 @@ def _stats(values: np.ndarray) -> dict[str, Any]:
 
 
 def _recommend_thresholds(stats: dict[str, dict[str, Any]]) -> dict[str, float]:
+    # 阈值推导策略（经验规则）：
+    # - 下界类指标：以低分位/最小值为基准，再留安全裕量
+    # - 上界类指标：以高分位/最大值为基准，再留安全裕量
+    # 目标是让“正常行为不过度误报”，同时保留异常检测灵敏度。
     thresholds: dict[str, float] = {}
 
     height = stats.get("height", {})
     if height:
+        # 高度下界：正常最小值再减去 2σ，避免偶发波动误判
         thresholds["h_min"] = float(height["min"]) - 2.0 * float(height["std"])
 
     tilt = stats.get("tilt", {})
     if tilt:
+        # 倾斜上界：正常最大值再加 2σ
         thresholds["max_tilt_deg"] = float(tilt["max"]) + 2.0 * float(tilt["std"])
 
     torque = stats.get("max_torque", {})
     if torque:
+        # 力矩上界：取极高分位 P99.9，再放宽 10%
         thresholds["max_torque"] = float(torque["P99_9"]) * 1.1
 
     zmp = stats.get("zmp_margin", {})
     if zmp:
+        # ZMP 裕度下界：取低分位 P1，再乘 0.8（更保守）
         thresholds["zmp_margin"] = float(zmp["P1"]) * 0.8
 
     ang = stats.get("angular_velocity", {})
     if ang:
+        # 角速度上界：P99 再放宽 20%
         thresholds["max_angular_velocity"] = float(ang["P99"]) * 1.2
 
     vel = stats.get("velocity_error", {})
     if vel:
+        # 速度误差上界：最大值 + 2σ
         thresholds["max_velocity_error"] = float(vel["max"]) + 2.0 * float(vel["std"])
 
     foot = stats.get("foot_clearance", {})
     if foot:
+        # 抬脚高度下界：正常最小值的一半
         thresholds["min_foot_clearance"] = float(foot["min"]) * 0.5
 
     action = stats.get("action_delta", {})
     if action:
+        # 动作变化率上界：P99 再放宽 20%
         thresholds["max_action_delta"] = float(action["P99"]) * 1.2
 
     stability = stats.get("stability_margin", {})
     if stability:
+        # 静态稳定裕度下界：P1 再乘 0.8
         thresholds["stability_margin"] = float(stability["P1"]) * 0.8
 
     return thresholds
@@ -181,6 +206,8 @@ def main() -> None:
     )
 
     all_values: dict[str, list[np.ndarray]] = {
+        # 与扩展 STL 规约对应的全部核心信号。
+        # 每个 key 存储多轮 episode 的样本片段，最后拼接统计。
         "height": [],
         "tilt": [],
         "max_torque": [],
@@ -194,6 +221,7 @@ def main() -> None:
     total_steps = 0
 
     for idx in range(args.episodes):
+        # 按 episode 轮转命令，覆盖不同正常工况。
         cmd = commands[idx % len(commands)]
         runner.env.cmd = cmd.copy()
         runner.run_episode()
@@ -209,6 +237,7 @@ def main() -> None:
             stats[key] = _stats(merged)
 
     thresholds = _recommend_thresholds(stats)
+    # 将“全局评估起始时间”与 baseline 采样窗口保持一致。
     thresholds["evaluation_start_time"] = float(args.skip_initial_s)
 
     baseline_payload = {
@@ -224,6 +253,8 @@ def main() -> None:
         json.dumps(baseline_payload, indent=2), encoding="utf-8"
     )
 
+    # 直接覆写配置文件中的 stl 段，而不是生成单独配置副本。
+    # 这样后续 run_fuzz_loop / run_g1_walking_test 会自动加载新阈值。
     spec = dict(config.stl_config)
     spec.update(thresholds)
     raw_config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
