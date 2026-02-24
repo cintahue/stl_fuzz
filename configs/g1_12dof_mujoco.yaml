@@ -75,3 +75,35 @@ stl:
   use_zmp: true
   evaluation_start_time: 1.0
   performance_start_time: 1.0
+
+# ── Surrogate model (v2) ─────────────────────────────────────────────────────
+surrogate:
+  # Minimum buffer size before the surrogate is activated
+  cold_start_threshold: 60
+  # GPR pre-filter: skip L1 configs where mu - 2*sigma > safe_threshold
+  safe_threshold: 0.5
+  # Number of Sobol initial samples per L2-L3 search episode
+  sobol_samples: 40
+  # Active-learning rounds inside L2-L3 search (5 candidates per round)
+  active_learning_rounds: 5
+  # MLP hidden dim
+  mlp_hidden_dim: 128
+  # Retrain full surrogate every N iterations
+  retrain_every: 10
+  # Maximum buffer size (entries)
+  buffer_max_size: 10000
+
+# ── LLM integration (v2) ─────────────────────────────────────────────────────
+llm:
+  # Set base_url to enable LLM features; leave empty to disable
+  base_url: "https://gptgod.cloud/v1"                          # e.g. "https://api.openai.com/v1"
+  model: "gpt-4o"                  # seed generation model
+  analysis_model: "gpt-4o"        # root-cause analysis model (can be stronger)
+  api_key_env: "sk-8bEzuhttr2AioqSW5c917043041d486a8e307c7b7b813aB6"        # environment variable holding the API key
+  seed_file: ""                         # path to pre-generated LLM seeds JSON
+  analysis_batch_size: 5               # failures per LLM analysis call
+  dedup_threshold: 0.15                # min L1 distance to skip duplicate analysis
+  temperature_seed: 0.7
+  temperature_analysis: 0.3
+  max_tokens: 2000
+  timeout: 30.0

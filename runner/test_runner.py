@@ -6,6 +6,7 @@ from typing import Optional
 import time
 
 import mujoco.viewer
+import numpy as np
 
 from robostl.core.config import DeployConfig
 from robostl.metrics.basic_walking import WalkingMetrics
@@ -138,6 +139,76 @@ class WalkingTestRunner:
             metrics=metrics,
             stl=stl_result.to_dict(),
         )
+
+    def run_episode_fast(
+        self,
+        push: Optional[np.ndarray] = None,
+        friction: Optional[np.ndarray] = None,
+        push_start: Optional[float] = None,
+        push_duration: float = 0.2,
+        push_body: str = "pelvis",
+        joint_pos_offset: Optional[np.ndarray] = None,
+        joint_vel_offset: Optional[np.ndarray] = None,
+        terrain: Optional[dict] = None,
+    ) -> float:
+        """Lightweight episode evaluation that returns only the STL robustness scalar.
+
+        Configures attacks, optionally sets terrain, runs a full episode with an
+        optional midpoint joint-state perturbation, and returns the scalar
+        ``stl_robustness`` value.  Skips rendering regardless of ``self.render``.
+
+        Args:
+            push:             3-D force vector [fx, fy, fz] in N, or None.
+            friction:         3-D friction params [mu_slide, mu_spin, mu_roll], or None.
+            push_start:       Time (s) at which the force perturbation is applied.
+            push_duration:    Duration (s) of the force perturbation.
+            push_body:        MuJoCo body name on which the force is applied.
+            joint_pos_offset: 12-D joint-position perturbation applied at push_start.
+            joint_vel_offset: 12-D joint-velocity perturbation applied at push_start.
+            terrain:          Terrain configuration dict, or None to leave unchanged.
+
+        Returns:
+            STL robustness score (negative → violation).
+        """
+        from robostl.attacks.force import ForcePerturbation
+        from robostl.attacks.terrain import FloorFrictionModifier
+
+        if terrain is not None:
+            self.env.set_terrain(terrain)
+
+        attacks = []
+        if friction is not None:
+            attacks.append(FloorFrictionModifier(friction=friction))
+        if push is not None and push_start is not None:
+            attacks.append(
+                ForcePerturbation(
+                    body_name=push_body,
+                    force=push,
+                    start_time=push_start,
+                    duration=push_duration,
+                )
+            )
+        self.env.attacks = attacks
+
+        has_perturbation = joint_pos_offset is not None or joint_vel_offset is not None
+        perturb_time = push_start if push_start is not None else 0.0
+
+        # Temporarily disable render to keep this call fast
+        saved_render = self.render
+        self.render = False
+        try:
+            if has_perturbation:
+                result = self.run_episode_with_midpoint_perturbation(
+                    perturbation_time=perturb_time,
+                    joint_pos_offset=joint_pos_offset,
+                    joint_vel_offset=joint_vel_offset,
+                )
+            else:
+                result = self.run_episode()
+        finally:
+            self.render = saved_render
+
+        return float(result.metrics.get("stl_robustness", 0.0))
 
     def run_episode_with_midpoint_perturbation(
         self,

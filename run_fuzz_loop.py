@@ -61,7 +61,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override policy path.",
     )
-    parser.add_argument("--iterations", type=int, default=50, help="Loop iterations.")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="Loop iterations (0 means run indefinitely until interrupted).",
+    )
     parser.add_argument("--seed-pool-size", type=int, default=200, help="Seed pool capacity.")
     parser.add_argument(
         "--output-dir",
@@ -834,7 +839,12 @@ def main() -> None:
     )
     searcher = Layer3StateSearcher(runner_l2, analyzer, search_config)
 
-    for iteration in range(args.iterations):
+    if args.iterations <= 0:
+        iteration_iter = iter(int, 1)
+    else:
+        iteration_iter = range(args.iterations)
+
+    for iteration in iteration_iter:
         exploit_ratio = min(args.exploit_cap, len(seed_pool) * 0.02)
         use_exploit = random.random() < exploit_ratio
         attempts = 0

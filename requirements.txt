@@ -7,3 +7,7 @@ matplotlib
 auto_LiRPA
 packaging
 setuptools
+# v2 additions
+scikit-learn    # Gaussian Process Regressor (surrogate model)
+scipy           # Sobol sequence sampling, statistical functions
+openai          # LLM client (OpenAI-compatible API)
