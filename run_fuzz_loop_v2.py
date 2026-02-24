@@ -244,28 +244,38 @@ def _l2l3_surrogate_search(
     sensitive_set: set[int] = set()
     if args.use_crown:
         try:
-            # Run a quick probe episode to get an observation at mid-episode
+            import torch
+
+            # Run a quick probe episode and capture the observation just before
+            # the attack window.  G1MujocoRunner builds observations inside
+            # step() via obs_builder.build(); after the final step the latest
+            # obs is stored in obs_builder.obs_buffer.obs.
             runner.env.set_terrain(terrain)
             runner.env.attacks = _build_attacks(
                 push, friction, settle_time + 0.5, push_duration, push_body
             )
             runner.env.reset()
-            obs = None
             probe_steps = int((settle_time + 0.5) / config.simulation_dt)
             for _ in range(probe_steps):
-                state = runner.env.step()
-            import torch
-            obs_np = runner.env._build_obs() if hasattr(runner.env, "_build_obs") else None
-            if obs_np is not None:
-                sensitivity = analyzer.compute_sensitivity(
-                    torch.tensor(obs_np, dtype=torch.float32)
-                )
-                for d in sensitivity.sensitive_dims[:10]:
-                    # sensitive_dims are obs indices; map to joint indices
-                    joint_idx = int(d) % num_joints
-                    sensitive_set.add(joint_idx)
+                runner.env.step()
+            # Retrieve the observation that was built during the last step
+            obs_np = runner.env.obs_builder.build(
+                runner.env.data,
+                runner.env.action,
+                runner.env.cmd,
+                runner.env.sim_time,
+                runner.env.counter,
+            )
+            sensitivity = analyzer.compute_sensitivity(
+                torch.tensor(obs_np, dtype=torch.float32)
+            )
+            for d in sensitivity.sensitive_dims[:10]:
+                # sensitive_dims are policy-input (obs) indices;
+                # joint positions start at obs[9], so offset accordingly.
+                joint_idx = max(0, int(d) - 9) % num_joints
+                sensitive_set.add(joint_idx)
         except Exception:
-            pass  # CROWN failed; use uniform scaling
+            pass  # CROWN unavailable or failed; fall back to uniform scaling
 
     # Build per-joint position and velocity scales
     pos_scales = np.array(
@@ -745,6 +755,7 @@ def main() -> None:
                     print(
                         f"[{iteration+1}] Skipping L1 (GPR: μ={mu:.3f}, σ={sigma:.3f})"
                     )
+                    skip_iteration = True
                     break  # move to next iteration
 
             # ── 3. Phase probing ──────────────────────────────────────────
