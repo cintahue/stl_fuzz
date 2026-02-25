@@ -59,6 +59,7 @@ from robostl.run_fuzz_loop import (
     _mutate_l1,
     _mutate_phase,
     _mutate_terrain,
+    _mutate_terrain_weighted,
     _normalize,
     _parse_range,
     _parse_rect,
@@ -205,6 +206,29 @@ def parse_args() -> argparse.Namespace:
         "--llm-analysis-batch", type=int, default=5,
         help="Failure cases per LLM analysis call.",
     )
+    # ── Shadow simulation (deviation-based STL) ───────────────────────────
+    parser.add_argument(
+        "--use-shadow", action="store_true", default=True,
+        help="Use shadow simulation for deviation-based STL evaluation.",
+    )
+    parser.add_argument("--no-shadow", dest="use_shadow", action="store_false")
+    # ── LLM mutation strategy ─────────────────────────────────────────────
+    parser.add_argument(
+        "--random-exploration-ratio", type=float, default=0.25,
+        help="Fraction of iterations using pure random (not LLM-guided) exploration.",
+    )
+    parser.add_argument(
+        "--strategy-update-interval", type=int, default=25,
+        help="Update LLM mutation strategy every N iterations.",
+    )
+    parser.add_argument(
+        "--strategy-failure-min", type=int, default=5,
+        help="Min failure cases before triggering strategy generation.",
+    )
+    parser.add_argument(
+        "--strategy-valid-iters", type=int, default=25,
+        help="Default validity window (iterations) for each mutation strategy.",
+    )
     return parser.parse_args()
 
 
@@ -226,6 +250,7 @@ def _l2l3_surrogate_search(
     args: argparse.Namespace,
     analyzer: CROWNSensitivityAnalyzer,
     config: DeployConfig,
+    deviation_config=None,
 ) -> tuple[float, np.ndarray, Optional[EpisodeResult], float]:
     """L2-L3 combined search: Sobol init → MLP active learning → verification.
 
@@ -293,6 +318,12 @@ def _l2l3_surrogate_search(
     lo = np.concatenate([[0.0], -pos_scales, -vel_scales])
     hi = np.concatenate([[1.0], pos_scales, vel_scales])
 
+    # ── Pre-compute shadow trace (zero-perturbation) for deviation-based STL ──
+    shadow_trace = None
+    if deviation_config is not None and getattr(args, "use_shadow", True):
+        runner.env.set_terrain(terrain)
+        shadow_trace = runner.run_shadow_episode(friction=friction, terrain=terrain)
+
     best_rho = float("inf")
     best_phase = 0.0
     best_l3 = np.zeros(l3_dim, dtype=np.float32)
@@ -307,19 +338,31 @@ def _l2l3_surrogate_search(
         x_l3_cand = cand[1:].copy()
         push_start = _phase_to_time(phase, period, cycle_start, settle_time)
 
-        runner.env.set_terrain(terrain)
-        runner.env.attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
-
         try:
-            result = runner.run_episode_with_midpoint_perturbation(
-                perturbation_time=push_start,
-                joint_pos_offset=x_l3_cand[:num_joints].copy(),
-                joint_vel_offset=x_l3_cand[num_joints:].copy(),
-            )
-            rho = float(result.metrics.get("stl_robustness", 0.0))
+            if shadow_trace is not None:
+                rho = runner.run_episode_fast_shadow(
+                    push=push,
+                    friction=friction,
+                    push_start=push_start,
+                    push_duration=push_duration,
+                    push_body=push_body,
+                    joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                    joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                    terrain=terrain,
+                    shadow_trace=shadow_trace,
+                    deviation_config=deviation_config,
+                )
+            else:
+                runner.env.set_terrain(terrain)
+                runner.env.attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
+                ep = runner.run_episode_with_midpoint_perturbation(
+                    perturbation_time=push_start,
+                    joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                    joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                )
+                rho = float(ep.metrics.get("stl_robustness", 0.0))
         except Exception:
             rho = 0.0
-            result = None
 
         x_l3_full = np.zeros(24, dtype=np.float32)
         x_l3_full[:l3_dim] = x_l3_cand
@@ -329,7 +372,7 @@ def _l2l3_surrogate_search(
             best_rho = rho
             best_phase = phase
             best_l3 = x_l3_full.copy()
-            best_episode = result
+            # best_episode populated in verification phase
 
     # Retrain MLP after initial batch
     if buffer.size >= 20:
@@ -368,21 +411,33 @@ def _l2l3_surrogate_search(
             x_l3_cand = cand[1:].copy()
             push_start = _phase_to_time(phase, period, cycle_start, settle_time)
 
-            runner.env.set_terrain(terrain)
-            runner.env.attacks = _build_attacks(
-                push, friction, push_start, push_duration, push_body
-            )
-
             try:
-                result = runner.run_episode_with_midpoint_perturbation(
-                    perturbation_time=push_start,
-                    joint_pos_offset=x_l3_cand[:num_joints].copy(),
-                    joint_vel_offset=x_l3_cand[num_joints:].copy(),
-                )
-                rho = float(result.metrics.get("stl_robustness", 0.0))
+                if shadow_trace is not None:
+                    rho = runner.run_episode_fast_shadow(
+                        push=push,
+                        friction=friction,
+                        push_start=push_start,
+                        push_duration=push_duration,
+                        push_body=push_body,
+                        joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                        joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                        terrain=terrain,
+                        shadow_trace=shadow_trace,
+                        deviation_config=deviation_config,
+                    )
+                else:
+                    runner.env.set_terrain(terrain)
+                    runner.env.attacks = _build_attacks(
+                        push, friction, push_start, push_duration, push_body
+                    )
+                    ep = runner.run_episode_with_midpoint_perturbation(
+                        perturbation_time=push_start,
+                        joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                        joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                    )
+                    rho = float(ep.metrics.get("stl_robustness", 0.0))
             except Exception:
                 rho = 0.0
-                result = None
 
             x_l3_full = np.zeros(24, dtype=np.float32)
             x_l3_full[:l3_dim] = x_l3_cand
@@ -392,7 +447,7 @@ def _l2l3_surrogate_search(
                 best_rho = rho
                 best_phase = phase
                 best_l3 = x_l3_full.copy()
-                best_episode = result
+                # best_episode populated in verification phase
 
         # Partial MLP retrain after each round
         surrogate.retrain_mlp(buffer, mlp_epochs=30)
@@ -411,18 +466,32 @@ def _l2l3_surrogate_search(
         x_l3_cand = x_full_cand[DataBuffer.L1_DIM + 1 :].copy()
         push_start = _phase_to_time(phase, period, cycle_start, settle_time)
 
-        runner.env.set_terrain(terrain)
-        runner.env.attacks = _build_attacks(
-            push, friction, push_start, push_duration, push_body
-        )
-
         try:
-            result = runner.run_episode_with_midpoint_perturbation(
-                perturbation_time=push_start,
-                joint_pos_offset=x_l3_cand[:num_joints].copy(),
-                joint_vel_offset=x_l3_cand[num_joints:].copy(),
-            )
-            rho = float(result.metrics.get("stl_robustness", 0.0))
+            if shadow_trace is not None:
+                result = runner.run_episode_with_shadow(
+                    push=push,
+                    friction=friction,
+                    push_start=push_start,
+                    push_duration=push_duration,
+                    push_body=push_body,
+                    joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                    joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                    terrain=terrain,
+                    shadow_trace=shadow_trace,
+                    deviation_config=deviation_config,
+                )
+                rho = float(result.metrics.get("stl_robustness", 0.0))
+            else:
+                runner.env.set_terrain(terrain)
+                runner.env.attacks = _build_attacks(
+                    push, friction, push_start, push_duration, push_body
+                )
+                result = runner.run_episode_with_midpoint_perturbation(
+                    perturbation_time=push_start,
+                    joint_pos_offset=x_l3_cand[:num_joints].copy(),
+                    joint_vel_offset=x_l3_cand[num_joints:].copy(),
+                )
+                rho = float(result.metrics.get("stl_robustness", 0.0))
         except Exception:
             rho = 0.0
             result = None
@@ -456,6 +525,7 @@ def _l2l3_coldstart_search(
     buffer: DataBuffer,
     args: argparse.Namespace,
     config: DeployConfig,
+    deviation_config=None,
 ) -> tuple[float, np.ndarray, Optional[EpisodeResult], float]:
     """Simplified cold-start search: grid phase scan + random L3 perturbations.
 
@@ -477,6 +547,11 @@ def _l2l3_coldstart_search(
 
     runner.env.set_terrain(terrain)
 
+    # Pre-compute shadow trace for deviation-based STL
+    shadow_trace = None
+    if deviation_config is not None and getattr(args, "use_shadow", True):
+        shadow_trace = runner.run_shadow_episode(friction=friction, terrain=terrain)
+
     for phase in phases:
         push_start = _phase_to_time(phase, period, cycle_start, settle_time)
         pos_offset = np.random.uniform(
@@ -490,17 +565,30 @@ def _l2l3_coldstart_search(
             num_joints,
         ).astype(np.float32)
 
-        runner.env.attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
         try:
-            result = runner.run_episode_with_midpoint_perturbation(
-                perturbation_time=push_start,
-                joint_pos_offset=pos_offset,
-                joint_vel_offset=vel_offset,
-            )
-            rho = float(result.metrics.get("stl_robustness", 0.0))
+            if shadow_trace is not None:
+                rho = runner.run_episode_fast_shadow(
+                    push=push,
+                    friction=friction,
+                    push_start=push_start,
+                    push_duration=push_duration,
+                    push_body=push_body,
+                    joint_pos_offset=pos_offset,
+                    joint_vel_offset=vel_offset,
+                    terrain=terrain,
+                    shadow_trace=shadow_trace,
+                    deviation_config=deviation_config,
+                )
+            else:
+                runner.env.attacks = _build_attacks(push, friction, push_start, push_duration, push_body)
+                ep = runner.run_episode_with_midpoint_perturbation(
+                    perturbation_time=push_start,
+                    joint_pos_offset=pos_offset,
+                    joint_vel_offset=vel_offset,
+                )
+                rho = float(ep.metrics.get("stl_robustness", 0.0))
         except Exception:
             rho = 0.0
-            result = None
 
         x_l3_full = np.zeros(24, dtype=np.float32)
         x_l3_full[:num_joints] = pos_offset
@@ -511,7 +599,6 @@ def _l2l3_coldstart_search(
             best_rho = rho
             best_phase = phase
             best_l3 = x_l3_full.copy()
-            best_episode = result
 
     return best_rho, best_l3, best_episode, best_phase
 
@@ -628,6 +715,16 @@ def main() -> None:
         obs_attacks=None,
     )
 
+    # ── Deviation STL config (shadow simulation mode) ─────────────────────
+    deviation_config = None
+    if getattr(args, "use_shadow", True):
+        try:
+            from robostl.specs.deviation_config import DeviationConfig
+            deviation_config = DeviationConfig.from_dict(config.deviation_stl_config)
+            print(f"[Shadow] Deviation STL enabled: {deviation_config}")
+        except Exception as exc:
+            print(f"[Shadow] Failed to init deviation config: {exc}. Shadow mode disabled.")
+
     # ── Surrogate model ───────────────────────────────────────────────────
     buffer_path = output_dir / "surrogate_data.npz"
     buffer = DataBuffer.load_or_create(buffer_path)
@@ -689,6 +786,20 @@ def main() -> None:
     failure_buffer: list[dict] = []
     all_analyses: list = []
 
+    # ── LLM mutation strategy ──────────────────────────────────────────────
+    mutation_strategy = None
+    strategy_remaining_iters: int = 0
+    strategy_generator = None
+    failure_buffer_for_strategy: list[dict] = []
+
+    if llm_client is not None:
+        try:
+            from robostl.llm.mutation_strategy import MutationStrategyGenerator
+            strategy_generator = MutationStrategyGenerator(llm_client)
+            print("[Strategy] Mutation strategy generator initialized.")
+        except Exception as exc:
+            print(f"[Strategy] Init failed: {exc}")
+
     # ── Main fuzzing loop ─────────────────────────────────────────────────
     if args.iterations <= 0:
         iteration_iter = iter(int, 1)
@@ -697,7 +808,20 @@ def main() -> None:
 
     for iteration in iteration_iter:
         exploit_ratio = min(args.exploit_cap, len(seed_pool) * 0.02)
-        use_exploit = random.random() < exploit_ratio
+        _rand = random.random()
+        # Three-channel sampling:
+        #   [0, random_ratio)                          → pure random (no strategy)
+        #   [random_ratio, random_ratio+exploit_ratio) → exploit + LLM strategy
+        #   rest                                       → BO / pure random
+        use_pure_random = _rand < args.random_exploration_ratio
+        use_exploit = (not use_pure_random) and (
+            _rand < args.random_exploration_ratio + exploit_ratio
+        )
+        active_strategy = (
+            mutation_strategy
+            if (use_exploit and strategy_remaining_iters > 0)
+            else None
+        )
 
         # ── 1. L1 parameter sampling ──────────────────────────────────────
         attempts = 0
@@ -711,6 +835,7 @@ def main() -> None:
                 push, friction, cmd, terrain = _mutate_l1(
                     seed, seed_pool, push_min, push_max, fric_min, fric_max,
                     cmd_min, cmd_max, args,
+                    strategy=active_strategy,
                 )
                 phase_mode = random.choice(["util", "random", "crossover"])
                 mate_phase = None
@@ -721,7 +846,7 @@ def main() -> None:
                     seed.phase, phase_mode, args.phase_mutation_samples,
                     args.phase_mutation_range, mate_phase=mate_phase,
                 )
-            elif use_surrogate and surrogate.is_ready:
+            elif use_surrogate and surrogate.is_ready and not use_pure_random:
                 # Bayesian Optimization suggests L1 candidate
                 bo_cands = bo.suggest(surrogate, n_suggestions=1)
                 x_l1_suggest = bo_cands[0] if bo_cands else None
@@ -818,6 +943,7 @@ def main() -> None:
                 args=args,
                 analyzer=analyzer,
                 config=config,
+                deviation_config=deviation_config,
             )
         else:
             refined_rho, best_l3, best_episode, best_phase = _l2l3_coldstart_search(
@@ -831,6 +957,7 @@ def main() -> None:
                 buffer=buffer,
                 args=args,
                 config=config,
+                deviation_config=deviation_config,
             )
 
         push_start = _phase_to_time(best_phase, period, cycle_start, args.settle_time)
@@ -903,6 +1030,7 @@ def main() -> None:
 
         if refined_rho < 0:
             _save_failure(failure_dir, iteration, failure_payload)
+            failure_buffer_for_strategy.append(failure_payload)
 
             if failure_analyzer is not None and failure_analyzer.should_analyze(
                 failure_payload, all_analyses
@@ -917,7 +1045,7 @@ def main() -> None:
                 all_analyses.extend(analyses)
                 pattern = failure_analyzer.summarize_patterns(all_analyses)
 
-                # Feedback path 2: generate new LLM seeds from pattern insights
+                # (Seed injection replaced by LLM mutation strategy; see step 6b below)
                 if seed_generator is not None and pattern.new_scenario_descriptions:
                     try:
                         new_seeds = seed_generator.generate_from_descriptions(
@@ -931,6 +1059,34 @@ def main() -> None:
                         print(f"[LLM] Seed generation error: {exc}")
 
                 failure_buffer.clear()
+
+        # ── 6b. LLM mutation strategy update ─────────────────────────────
+        if strategy_remaining_iters > 0:
+            strategy_remaining_iters -= 1
+
+        if (
+            strategy_generator is not None
+            and (iteration + 1) % args.strategy_update_interval == 0
+            and len(failure_buffer_for_strategy) >= args.strategy_failure_min
+        ):
+            try:
+                from robostl.llm.mutation_strategy import compute_pool_stats
+                pool_stats = compute_pool_stats(seed_pool)
+                new_strategy = strategy_generator.generate_strategy(
+                    failure_buffer_for_strategy,
+                    pool_stats=pool_stats,
+                    valid_for_iterations=args.strategy_valid_iters,
+                )
+                mutation_strategy = new_strategy
+                strategy_remaining_iters = new_strategy.valid_for_iterations
+                print(
+                    f"[Strategy] Updated at iter {iteration+1}: "
+                    f"conf={new_strategy.confidence:.2f}, "
+                    f"valid={new_strategy.valid_for_iterations} iters. "
+                    f"Reason: {new_strategy.reasoning[:80]}"
+                )
+            except Exception as exc:
+                print(f"[Strategy] Generation error: {exc}")
 
         # ── 7. Periodic surrogate maintenance ─────────────────────────────
         retrain_every = 10
